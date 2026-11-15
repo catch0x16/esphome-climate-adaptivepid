@@ -36,5 +36,3 @@ __pycache__
 
 /.venv
 .esphome/
-
-/tools/simulation/.cache
