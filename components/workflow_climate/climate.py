@@ -26,6 +26,7 @@ CONF_KI = "ki"
 CONF_KD = "kd"
 CONF_MAX_ADJUSTMENT_UNDER = "max_adjustment_under"
 CONF_MAX_ADJUSTMENT_OVER = "max_adjustment_over"
+CONF_SETPOINT_DEADBAND = "setpoint_deadband"
 
 CONF_ADAPTIVE = "adaptive"
 CONF_RESPONSE_TIME = "response_time"
@@ -61,6 +62,11 @@ PID_SCHEMA = cv.Schema(
         cv.Optional(CONF_KD, default=0.0): cv.float_,
         cv.Optional(CONF_MAX_ADJUSTMENT_UNDER, default=2.0): cv.positive_float,
         cv.Optional(CONF_MAX_ADJUSTMENT_OVER, default=2.0): cv.positive_float,
+        # How far past a device step the correction must go before the device
+        # setpoint steps towards more output; stops flipping at a step boundary.
+        cv.Optional(CONF_SETPOINT_DEADBAND, default=0.1): cv.float_range(
+            min=0.0, max=1.0
+        ),
         # Continuous tuning: kp and ki follow the measured response of the room.
         # The configured kp and ki are then only the starting values.
         cv.Optional(CONF_ADAPTIVE, default=True): cv.boolean,
@@ -198,6 +204,7 @@ async def to_code(config):
         cg.add(var.set_kd(conf[CONF_KD]))
         cg.add(var.set_max_adjustment_under(conf[CONF_MAX_ADJUSTMENT_UNDER]))
         cg.add(var.set_max_adjustment_over(conf[CONF_MAX_ADJUSTMENT_OVER]))
+        cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))

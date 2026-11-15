@@ -29,6 +29,10 @@ float ClimateDeviceAdapter::clamp_target(float value) const {
 }
 
 float ClimateDeviceAdapter::quantize_target(float value) const {
+  return this->quantize_target_(value, devicestate::StepRounding::Nearest);
+}
+
+float ClimateDeviceAdapter::quantize_target_(float value, devicestate::StepRounding rounding, float held) const {
   if (this->step_ <= 0.0f) {
     return this->clamp_target(value);
   }
@@ -38,8 +42,23 @@ float ClimateDeviceAdapter::quantize_target(float value) const {
   if (lowest > highest) {
     return this->clamp_target(value);
   }
-  value = std::round(value / this->step_) * this->step_;
+  value = devicestate::round_to_step_held(value, this->step_, rounding, held, this->setpoint_deadband_);
   return std::max(lowest, std::min(highest, value));
+}
+
+devicestate::StepRounding ClimateDeviceAdapter::correction_rounding_() const {
+  // A PID correction is rounded towards less output, so rounding never adds
+  // heating or cooling the PID did not ask for. The integral makes up the
+  // shortfall over time; rounding to nearest would instead push the device up
+  // to a quarter step past the request, half the time.
+  switch (this->logical_mode_) {
+    case climate::CLIMATE_MODE_HEAT:
+      return devicestate::StepRounding::Down;
+    case climate::CLIMATE_MODE_COOL:
+      return devicestate::StepRounding::Up;
+    default:
+      return devicestate::StepRounding::Nearest;
+  }
 }
 
 bool ClimateDeviceAdapter::device_power_on() const {
@@ -145,8 +164,9 @@ bool ClimateDeviceAdapter::internalTurnOff() {
   return true;
 }
 
-float ClimateDeviceAdapter::quantize_within(float value, float min_allowed, float max_allowed) const {
-  float quantized = this->quantize_target(value);
+float ClimateDeviceAdapter::quantize_within(float value, float min_allowed, float max_allowed,
+                                            devicestate::StepRounding rounding, float held) const {
+  float quantized = this->quantize_target_(value, rounding, held);
   if (this->step_ <= 0.0f) {
     return quantized;
   }
@@ -162,9 +182,16 @@ float ClimateDeviceAdapter::quantize_within(float value, float min_allowed, floa
 
 bool ClimateDeviceAdapter::internalSetCorrectedTemperature(const float value, const float minAllowed,
                                                            const float maxAllowed) {
+  return this->stage_target_(value, minAllowed, maxAllowed, this->correction_rounding_());
+}
+
+bool ClimateDeviceAdapter::stage_target_(const float value, const float minAllowed, const float maxAllowed,
+                                         const devicestate::StepRounding rounding) {
   const uint32_t now = millis();
   const float clamped = this->clamp_target(devicestate::clamp(value, minAllowed, maxAllowed));
-  const float quantized = this->quantize_within(clamped, minAllowed, maxAllowed);
+  // The setpoint last sent is the one the deadband holds on to.
+  const float held = this->has_sent_target_ ? this->last_sent_target_ : NAN;
+  const float quantized = this->quantize_within(clamped, minAllowed, maxAllowed, rounding, held);
 
   // What the device is believed to be set to. Right after a command the inner
   // climate's report may still be stale, and a device that rounds differently
@@ -206,7 +233,9 @@ void ClimateDeviceAdapter::sync_target() {
   if (!this->tracker_.commanded_on() || !std::isfinite(this->target_)) {
     return;
   }
-  if (this->internalSetCorrectedTemperature(this->target_, this->min_temp_, this->max_temp_)) {
+  // The user's own target: no PID integral would make up a directional
+  // rounding, so it is rounded to nearest.
+  if (this->stage_target_(this->target_, this->min_temp_, this->max_temp_, devicestate::StepRounding::Nearest)) {
     this->commit();
   }
 }

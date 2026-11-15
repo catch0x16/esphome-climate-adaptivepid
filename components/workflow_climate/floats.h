@@ -28,6 +28,59 @@ namespace devicestate {
         return value;
     }
 
+    // How a value is snapped to a device's step grid.
+    enum class StepRounding { Nearest, Down, Up };
+
+    // Snap `value` to a multiple of `step`. A value already on the grid (within
+    // float noise) stays put whichever way it is rounded.
+    __attribute__((unused))static float round_to_step(const float value, const float step, const StepRounding rounding) {
+        if (!(step > 0.0f)) {
+            return value;
+        }
+        const float steps = value / step;
+        constexpr float GRID_TOLERANCE = 0.001f;  // in steps
+        switch (rounding) {
+            case StepRounding::Down:
+                return std::floor(steps + GRID_TOLERANCE) * step;
+            case StepRounding::Up:
+                return std::ceil(steps - GRID_TOLERANCE) * step;
+            case StepRounding::Nearest:
+            default:
+                return std::round(steps) * step;
+        }
+    }
+
+    // As round_to_step, with a deadband against the setpoint already `held` by
+    // the device. With directional rounding (Down when heating, Up when
+    // cooling), a step towards more output is only taken once `value` is past
+    // the step boundary by `margin`, so a value hovering at a boundary does not
+    // flip the device between two steps. A step towards less output is taken at
+    // once, so the deadband never holds more output than was asked for.
+    // Nearest rounding, a non-finite `held` or no margin: plain round_to_step.
+    __attribute__((unused))static float round_to_step_held(const float value, const float step,
+                                                           const StepRounding rounding, const float held,
+                                                           const float margin) {
+        const float plain = round_to_step(value, step, rounding);
+        if (rounding == StepRounding::Nearest || !(margin > 0.0f) || !std::isfinite(held) || !(step > 0.0f)) {
+            return plain;
+        }
+        const float same = step * 0.01f;
+        if (rounding == StepRounding::Down) {
+            // Heating: a higher setpoint is more output.
+            if (plain <= held + same) {
+                return plain;
+            }
+            const float past_margin = round_to_step(value - margin, step, rounding);
+            return past_margin > held ? past_margin : held;
+        }
+        // Cooling: a lower setpoint is more output.
+        if (plain >= held - same) {
+            return plain;
+        }
+        const float past_margin = round_to_step(value + margin, step, rounding);
+        return past_margin < held ? past_margin : held;
+    }
+
     __attribute__((unused))static double calculateDelta(double y1, double y2) {
         return y2 - y1;
     }

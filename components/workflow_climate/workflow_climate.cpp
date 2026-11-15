@@ -175,6 +175,7 @@ void WorkflowClimate::setup() {
   this->device_.set_inner(this->inner_);
   this->device_.set_min_cycle_ms(this->min_cycle_ms_);
   this->device_.set_settle_ms(this->settle_ms_);
+  this->device_.set_setpoint_deadband(this->pid_enabled_ ? this->setpoint_deadband_ : 0.0f);
   this->refresh_traits_();
 
   if (this->traits_.has_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE |
@@ -565,8 +566,9 @@ void WorkflowClimate::dump_config() {
   ESP_LOGCONFIG(TAG, "  Settle time: %u ms", static_cast<unsigned>(this->settle_ms_));
   ESP_LOGCONFIG(TAG, "  Room temperature: %s", this->temperature_sensor_ != nullptr ? "sensor" : "inner climate");
   if (this->pid_enabled_) {
-    ESP_LOGCONFIG(TAG, "  PID: kp=%.3f ki=%.4f kd=%.3f, adjustment -%.2f/+%.2f", this->kp_, this->ki_, this->kd_,
-                  this->max_adjustment_under_, this->max_adjustment_over_);
+    ESP_LOGCONFIG(TAG, "  PID: kp=%.3f ki=%.4f kd=%.3f, adjustment -%.2f/+%.2f, setpoint deadband %.2f", this->kp_,
+                  this->ki_, this->kd_, this->max_adjustment_under_, this->max_adjustment_over_,
+                  this->setpoint_deadband_);
     if (this->tuning_.adaptive) {
       ESP_LOGCONFIG(TAG, "  PID tuning: adaptive, response time %.0f s, dead time %.0f s, kp %.2f..%.2f",
                     this->tuning_.response_time_s, this->tuning_.dead_time_s, this->tuning_.kp_min,

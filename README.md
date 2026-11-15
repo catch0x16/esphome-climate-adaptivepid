@@ -68,7 +68,7 @@ climate:
 | `update_interval` | `2s` | How often the workflows run. |
 | `settle_time` | `2 × update_interval + 5s` | How long after a power command the inner climate's reported power is ignored. |
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
-| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`). See [PID gains](#pid-gains). |
+| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). |
 | `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. |
 
 At least one of `pid` and `hysteresis` is required. The standard climate
@@ -99,10 +99,22 @@ offset = kp * error + ki * integral(error) + kd * d(error)/dt      error = targe
 - `kd`: degrees of setpoint per degree-per-second of change.
 
 The offset is limited to `-max_adjustment_under .. +max_adjustment_over` when
-heating (mirrored when cooling) and then rounded to the device's step. The
-rounded value never exceeds those limits, so a limit should be a multiple of
-the step: on a 0.5°C device `max_adjustment_over: 0.25` allows no upward move.
-A warning is logged at startup when a limit is not a multiple of the step.
+heating (mirrored when cooling) and then rounded to the device's step, towards
+less output: down when heating, up when cooling. Rounding therefore never asks
+for more heating or cooling than the PID did; the integral makes up the
+shortfall over time. The user's own target, when no correction applies, is
+rounded to nearest.
+
+`setpoint_deadband` (default 0.1°C) stops the device setpoint flipping between
+two steps while the correction hovers at a step boundary: a step towards more
+output is taken only once the correction is that far past the boundary, a step
+towards less output at once. On a 0.5°C device held at 21.0 while heating, the
+setpoint moves to 21.5 once the correction reaches 21.6, and back to 21.0 as
+soon as it falls below 21.5. `0` disables it. The rounded value never exceeds those limits, so a limit
+should be a multiple of the step: on a 0.5°C device `max_adjustment_over: 0.25`
+allows no upward move. A warning is logged at startup when a limit is not a
+multiple of the step. With a target between steps (67°F is 19.44°C) the usable
+range is narrower still: `max_adjustment_over: 0.5` reaches 19.5 at most.
 The integral stops accumulating while the offset is at a limit, and it is
 reset on a target change and while the device is switched off.
 
@@ -180,6 +192,10 @@ c++ -std=c++17 -Wall -Wextra -o /tmp/test_power_tracker tests/test_power_tracker
 # PID controller, no ESPHome needed
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_adaptive_pid \
   tests/test_adaptive_pid.cpp components/workflow_climate/adaptive_pid.cpp && /tmp/test_adaptive_pid
+
+# Setpoint rounding to the device step, no ESPHome needed
+c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_round_to_step \
+  tests/test_round_to_step.cpp && /tmp/test_round_to_step
 
 # Response-rate estimator and tuning rule, no ESPHome needed
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_response_rate_estimator \

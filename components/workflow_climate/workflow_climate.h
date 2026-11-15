@@ -51,6 +51,7 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_kd(float value) { this->kd_ = value; }
   void set_max_adjustment_under(float value) { this->max_adjustment_under_ = value; }
   void set_max_adjustment_over(float value) { this->max_adjustment_over_ = value; }
+  void set_setpoint_deadband(float value) { this->setpoint_deadband_ = value; }
   void set_pid_adaptive(bool value) { this->tuning_.adaptive = value; }
   void set_pid_response_time(uint32_t ms) { this->tuning_.response_time_s = ms / 1000.0f; }
   void set_pid_dead_time(uint32_t ms) { this->tuning_.dead_time_s = ms / 1000.0f; }
@@ -158,6 +159,7 @@ class WorkflowClimate : public Component, public climate::Climate {
   float kd_{0.0f};
   float max_adjustment_under_{2.0f};
   float max_adjustment_over_{2.0f};
+  float setpoint_deadband_{0.0f};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
 
