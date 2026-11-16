@@ -86,91 +86,12 @@ namespace workflow {
             return true;
         }
 
-        void PidWorkflowStep::setSoftStartEnabled(bool enabled) {
-            if (enabled != this->softStart.enabled()) {
-                ESP_LOGI(TAG, "Soft start %s", enabled ? "enabled" : "disabled");
-            }
-            this->softStart.set_enabled(enabled);
-        }
-
-        float PidWorkflowStep::updateSoftStart(const float currentTemperature, const bool demandRaised, const float maxOutput,
-                                               const float maxOffset, devicestate::IDeviceStateManager* deviceManager, uint32_t now) {
-            const bool powerOn = deviceManager->isInternalPowerOn();
-            const bool operating = powerOn && deviceManager->getDeviceStatus().operating;
-            const bool heatingNow = deviceManager->getOffsetDirection();
-            const float sign = heatingNow ? 1.0f : -1.0f;
-            const float target = deviceManager->getTargetTemperature();
-            const float deviceSetpoint = deviceManager->getDeviceState().targetTemperature;
-            // How far the room is short of the target, in the direction of more output.
-            const float error = sign * (target - currentTemperature);
-            const bool demand = std::isfinite(error) && error > 0.0f;
-
-            // The step does not run outside HEAT/COOL. After a gap (first run,
-            // or the outer climate was off) the device counts as having been
-            // off, so a running one is soft started from where it runs, and a
-            // measurement that spans the gap is dropped.
-            if (!this->hasPrevious || now - this->previousRunMs > MAX_SOFT_START_GAP_MS) {
-                this->previousPowerOn = false;
-                this->previousOperating = operating;
-                this->previousDemand = false;
-                this->softStart.discard_measurement();
-            }
-
-            // How far the room went past the target after the last soft start.
-            if (this->softStart.observe(now, heatingNow, currentTemperature, target, powerOn, maxOffset)) {
-                ESP_LOGI(TAG, "Soft start overshoot %.2f C: %s offset now %.2f C",
-                    this->softStart.last_overshoot(), heatingNow ? "heating" : "cooling", this->softStart.offset(heatingNow));
-            }
-            if (!powerOn) {
-                this->softStart.cancel();
-            } else {
-                const char *reason = nullptr;
-                if (!this->previousPowerOn) {
-                    reason = "switched on";
-                } else if (demandRaised) {
-                    reason = "target raised";
-                } else if (!operating && demand && !this->previousDemand) {
-                    reason = "demand began";
-                }
-                if (reason != nullptr && this->softStart.enabled()) {
-                    // A running device is kept where it is and raised from there.
-                    const float current = sign * (deviceSetpoint - target);
-                    this->softStart.arm(now, heatingNow, target, currentTemperature, operating, current);
-                    ESP_LOGI(TAG, "Soft start (%s): output capped at %.2f C from the target (offset %.2f C)",
-                        reason, this->softStart.cap(now, maxOutput), this->softStart.offset(heatingNow));
-                }
-            }
-            this->hasPrevious = true;
-            this->previousRunMs = now;
-            this->previousPowerOn = powerOn;
-            this->previousOperating = operating;
-            this->previousDemand = demand;
-
-            // Heat has arrived: hand over to the PID from the setpoint the
-            // device has now, so its output continues from there.
-            if (powerOn && this->softStart.heat_arrived(currentTemperature)) {
-                const float pidOutput = sign * this->adaptivePID->raw_offset();
-                const float capNow = this->softStart.cap(now, maxOutput);
-                const float bias = this->softStart.hand_off(now, maxOutput, pidOutput);
-                ESP_LOGI(TAG, "Soft start: heat arrived, handing over at %.2f C from the target (PID %.2f C, bias %.2f C fading over %u s)",
-                    capNow, pidOutput, bias, static_cast<unsigned>(this->softStart.config().hold_ms / 1000));
-            }
-            return this->softStart.cap(now, maxOutput);
-        }
-
         void PidWorkflowStep::run(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager) {
             if (deviceManager == nullptr) {
                 ESP_LOGW(TAG, "run: deviceManager is null");
                 return;
             }
-            // A target change towards more output (or a change of direction) is a new demand.
-            const float previousTarget = this->adaptivePID->get_target();
-            const bool previousHeating = this->adaptivePID->heating();
             const bool updatedPidTarget = this->ensurePIDTarget(deviceManager);
-            const bool demandRaised = updatedPidTarget &&
-                (this->adaptivePID->heating() != previousHeating ||
-                 (this->adaptivePID->heating() ? this->adaptivePID->get_target() > previousTarget
-                                               : this->adaptivePID->get_target() < previousTarget));
 
             if (this->tuning.adaptive) {
                 // Learn how the room responds, and retune from it.
@@ -203,34 +124,26 @@ namespace workflow {
                 }
             }
 
-            const float adjustMinOffset = deviceManager->getOffsetDirection()
-                ? this->maxAdjustmentUnder
-                : this->maxAdjustmentOver;
-            const float adjustMaxOffset = deviceManager->getOffsetDirection()
-                ? this->maxAdjustmentOver
-                : this->maxAdjustmentUnder;
-            const float target = deviceManager->getTargetTemperature();
-            const float adjustedMinTemp = devicestate::clamp(target - adjustMinOffset, this->minTemp, this->maxTemp);
-            const float adjustedMaxTemp = devicestate::clamp(target + adjustMaxOffset, this->minTemp, this->maxTemp);
-            const uint32_t now = esphome::millis();
-
-            // Every run, so power and demand changes are seen while the device is off too.
-            const bool heatingDirection = deviceManager->getOffsetDirection();
-            const float maxOutput = heatingDirection ? adjustedMaxTemp - target : target - adjustedMinTemp;
-            const float maxOffset = heatingDirection ? target - adjustedMinTemp : adjustedMaxTemp - target;
-            const float cap = this->updateSoftStart(currentTemperature, demandRaised, maxOutput, maxOffset, deviceManager, now);
-
             // if pid target is not updated and internal power is not on
             if (updatedPidTarget || deviceManager->isInternalPowerOn()) {
+                const float adjustMinOffset = deviceManager->getOffsetDirection()
+                    ? this->maxAdjustmentUnder
+                    : this->maxAdjustmentOver;
+                const float adjustMaxOffset = deviceManager->getOffsetDirection()
+                    ? this->maxAdjustmentOver
+                    : this->maxAdjustmentUnder;
+                const float target = deviceManager->getTargetTemperature();
+                const float adjustedMinTemp = devicestate::clamp(target - adjustMinOffset, this->minTemp, this->maxTemp);
+                const float adjustedMaxTemp = devicestate::clamp(target + adjustMaxOffset, this->minTemp, this->maxTemp);
+
                 ESP_LOGI(TAG, "PidWorkflowStep (Device) target={%.2f} adjustedMin={%.2f} adjustedMax={%.2f} powerOn={%s}",
                     this->adaptivePID->get_target(), adjustedMinTemp, adjustedMaxTemp, YESNO(deviceManager->isInternalPowerOn()));
+
+                unsigned long now = esphome::millis();
 
                 // The PID knows the range it may use, so its integral stops
                 // accumulating once the setpoint is pinned at either end.
                 this->adaptivePID->set_output_limits(adjustedMinTemp - target, adjustedMaxTemp - target);
-                this->adaptivePID->set_output_cap(cap);
-                // After a soft start's hand-off; the bias is in output degrees, the PID's offset is not.
-                this->adaptivePID->set_output_bias((heatingDirection ? 1.0f : -1.0f) * this->softStart.bias(now));
                 const float setPointCorrectionSimple =
                     this->adaptivePID->update(currentTemperature, now, deviceManager->isInternalPowerOn());
                 const float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);

@@ -221,87 +221,6 @@ estimate: rates learned from full-output and from partial-output windows should
 agree. Usage is at the top of the file. The export holds states only, so
 defrost is not visible there and is caught only as wrong-way windows.
 
-### Soft start
-
-Handed the full proportional correction at a start, a heat pump that is large
-for its room overshoots. With `soft_start`, when demand begins the device
-setpoint is capped a learned `offset` below the target (above it when
-cooling), and the cap climbs evenly to the target over `hold`: offset ÷ hold
-per minute. The device takes its setpoint in steps (0.5°C on a CN105 unit), so
-it sits at each step for a while. Heating to 20°C with an offset of 1 and a
-20 minute hold, the device is given 19.0, then 19.5 after about 10 minutes and
-20.0 after about 20. The cap keeps rising at the same rate past the target
-until the PID asks for less, so nothing jumps at the end.
-
-```yaml
-    pid:
-      kp: 0.9
-      soft_start:
-        initial_offset: 1.0
-        hold: 20min
-```
-
-The climb stops as soon as heat arrives: once the room has risen 0.15°C above
-its lowest reading since the soft start began (this does not rely on the
-device reporting that it runs). At that moment the PID takes over from the
-setpoint the device already has. Its own output then would be kp times the
-whole shortfall, which the slow start has made larger, just as the heat
-already on its way reaches the room; so it is given a bias of (cap − its
-output), and from there the setpoint moves only as the room moves: down as
-the room rises. The bias fades to zero over `hold`, giving the PID back its
-full authority if the room stalls.
-
-If heat has not arrived by the time the cap no longer holds the PID back, the
-PID simply continues below it. While the cap holds the PID back its integral
-does not accumulate.
-
-Demand begins when the workflow switches the device on, when the target moves
-towards more output, and when the room crosses the target while the device is
-on but idle (where the device would otherwise start on its own). A device that
-is already running when demand begins is kept at its current output and raised
-from there, never stopped.
-
-The offset is learned per mode from each soft start's overshoot: the room's
-peak past the target, from the start until 30 minutes after the cap lifts or
-10 minutes after the device is switched off, whichever comes first (at most
-90 minutes). It does not depend on the device reporting that it runs, since a
-unit can deliver heat while reporting idle. More than 0.25°C of overshoot
-starts the next one lower, by half the excess; no more than that starts it
-0.1°C higher, so the offset settles at the smallest one that avoids overshoot.
-It stays between 0 and `max_adjustment_under`. A measurement is dropped when
-the target or mode changes, when new demand begins before the soft start has
-ended, or when the soft start is switched off. The offsets are saved like the
-room model (kept across flashes until `initial_offset` changes) and published
-as `Soft start offset heating` / `Soft start offset cooling`, with the last
-measured overshoot as `Soft start overshoot`; `Soft start active` shows when
-the cap applies.
-
-Corrections are rounded down to the device's step, so a target that is not on
-a step starts lower: 19.44 with an offset of 1 gives a cap of 18.44, which the
-device receives as 18.0.
-
-| `soft_start` option | Default | Meaning |
-|---|---|---|
-| `enabled` | `true` | State at boot. `set_soft_start_enabled()` switches it while running. |
-| `initial_offset` | `1.5` | How far below the target (above it when cooling) a soft start begins before anything is learned, °C (0 to 3). |
-| `hold` | `20min` | How long the cap takes to climb from the offset to the target, and the hand-off bias to fade. |
-
-To switch it from Home Assistant, for instance to compare nights with and
-without it:
-
-```yaml
-switch:
-  - platform: template
-    name: "Soft start"
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    entity_category: config
-    turn_on_action:
-      - lambda: id(hvac_workflow).set_soft_start_enabled(true);
-    turn_off_action:
-      - lambda: id(hvac_workflow).set_soft_start_enabled(false);
-```
-
 ## Behaviour
 
 - The workflows run in `HEAT` and `COOL`. In every other mode, and for fan,
@@ -359,10 +278,6 @@ c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_room_mod
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_store \
   tests/test_tuning_store.cpp && /tmp/test_tuning_store
 
-# Soft start and the PID output cap, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_soft_start \
-  tests/test_soft_start.cpp components/workflow_climate/adaptive_pid.cpp && /tmp/test_soft_start
-
 # Host build against the demo climate
 esphome compile test.yaml
 
@@ -382,6 +297,5 @@ Layout of `components/workflow_climate/`:
 - `hysterisis_workflowstep.*`, `pid_workflowstep.*`, `adaptive_pid.*`: the controller.
 - `room_model.h`: the learned room model and the output estimate; no ESPHome dependency.
 - `tuning_rule.h`: the gains that follow from the model; no ESPHome dependency.
-- `soft_start.h`: the soft start cap and its learned offsets; no ESPHome dependency.
 - `tuning_store.h`: whether each learned value starts from what was learned or its seed at boot; no ESPHome dependency.
 - `controller_types.h`: the interface between the controller and the device.

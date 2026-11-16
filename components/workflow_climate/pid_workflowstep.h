@@ -8,7 +8,6 @@
 
 #include "adaptive_pid.h"
 #include "room_model.h"
-#include "soft_start.h"
 #include "tuning_rule.h"
 
 namespace workflow {
@@ -32,23 +31,7 @@ namespace workflow {
             bool useConfiguredKi[2]{false, false};
             bool heating{true};
 
-            SoftStart softStart;
-            // For the soft start's triggers: the previous run's power and demand.
-            bool hasPrevious{false};
-            uint32_t previousRunMs{0};
-            // Runs further apart than this are not compared (the step does not run outside HEAT/COOL).
-            static constexpr uint32_t MAX_SOFT_START_GAP_MS = 30000;
-            bool previousPowerOn{false};
-            bool previousDemand{false};
-            bool previousOperating{false};
-
             bool ensurePIDTarget(devicestate::IDeviceStateManager* deviceManager);
-            // Arms the soft start when demand begins and measures its overshoot.
-            // `maxOutput`: the most output allowed above the target; `maxOffset`:
-            // how far below the target the setpoint may go. Returns the cap for
-            // this run (+infinity: none).
-            float updateSoftStart(const float currentTemperature, const bool demandRaised, const float maxOutput,
-                                  const float maxOffset, devicestate::IDeviceStateManager* deviceManager, uint32_t now);
             void applyTunedGains(bool heating);
         
         public:
@@ -82,17 +65,6 @@ namespace workflow {
             void startModel(const ModelState &state, bool restoredHeat, bool restoredCool);
             // Forget everything learned and start from these seeds.
             void resetTuning(const ModelState &seeds);
-
-            // Soft start (soft_start.h). Can be switched on and off while running.
-            void setSoftStart(const SoftStartConfig &config) { this->softStart.configure(config); }
-            void setSoftStartEnabled(bool enabled);
-            bool softStartEnabled() const { return this->softStart.enabled(); }
-            bool softStartActive() const { return this->softStart.active(); }
-            // The learned offset below the target a soft start begins at, per mode.
-            float softStartOffset(bool heating) const { return this->softStart.offset(heating); }
-            void setSoftStartOffset(bool heating, float value) { this->softStart.set_offset(heating, value); }
-            // How far past the target the room went after the last measured soft start.
-            float softStartLastOvershoot() const { return this->softStart.last_overshoot(); }
         };
 
     }

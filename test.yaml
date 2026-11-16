@@ -45,18 +45,6 @@ sensor:
     update_interval: 60s
     lambda: return 5.0;
 
-# Switches the soft start at runtime, e.g. to compare nights with and without it.
-switch:
-  - platform: template
-    name: "Soft start"
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    entity_category: config
-    turn_on_action:
-      - lambda: id(test_heatpump).set_soft_start_enabled(true);
-    turn_off_action:
-      - lambda: id(test_heatpump).set_soft_start_enabled(false);
-
 climate:
   - platform: workflow_climate
     id: test_heatpump
@@ -76,9 +64,6 @@ climate:
       max_adjustment_over: 2.0
       initial_heat_rate: 2.5
       initial_cool_rate: 1.5
-      soft_start:
-        initial_offset: 1.5
-        hold: 20min
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5
