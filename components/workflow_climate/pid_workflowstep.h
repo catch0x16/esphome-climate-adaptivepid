@@ -43,10 +43,12 @@ namespace workflow {
             bool previousOperating{false};
 
             bool ensurePIDTarget(devicestate::IDeviceStateManager* deviceManager);
-            // Arms the soft start when demand begins and learns the device's
-            // start point. Returns the cap for this run (+infinity: none).
+            // Arms the soft start when demand begins and measures its overshoot.
+            // `maxOutput`: the most output allowed above the target; `maxOffset`:
+            // how far below the target the setpoint may go. Returns the cap for
+            // this run (+infinity: none).
             float updateSoftStart(const float currentTemperature, const bool demandRaised, const float maxOutput,
-                                  devicestate::IDeviceStateManager* deviceManager, uint32_t now);
+                                  const float maxOffset, devicestate::IDeviceStateManager* deviceManager, uint32_t now);
             void applyTunedGains(bool heating);
         
         public:
@@ -86,9 +88,11 @@ namespace workflow {
             void setSoftStartEnabled(bool enabled);
             bool softStartEnabled() const { return this->softStart.enabled(); }
             bool softStartActive() const { return this->softStart.active(); }
-            // The learned call at which the device starts, per mode.
-            float softStartPoint(bool heating) const { return this->softStart.start_point(heating); }
-            void setSoftStartPoint(bool heating, float value) { this->softStart.set_start_point(heating, value); }
+            // The learned offset below the target a soft start begins at, per mode.
+            float softStartOffset(bool heating) const { return this->softStart.offset(heating); }
+            void setSoftStartOffset(bool heating, float value) { this->softStart.set_offset(heating, value); }
+            // How far past the target the room went after the last measured soft start.
+            float softStartLastOvershoot() const { return this->softStart.last_overshoot(); }
         };
 
     }

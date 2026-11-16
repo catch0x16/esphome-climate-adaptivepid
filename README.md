@@ -223,22 +223,27 @@ defrost is not visible there and is caught only as wrong-way windows.
 
 ### Soft start
 
-A heat pump's own controller decides when to run, and how hard, from how far
-its setpoint is past its room reading. Handed the full proportional correction
-at a start, a unit that is large for its room overshoots. With `soft_start`,
-when demand begins the PID's output is capped just below the point at which the
-device starts, held there, and the cap is then raised gradually. Below the cap
-the PID runs as usual, and while the cap holds it back its integral does not
-accumulate, so nothing jumps when the cap lifts.
+Handed the full proportional correction at a start, a heat pump that is large
+for its room overshoots. With `soft_start`, when demand begins the device
+setpoint is capped a learned `offset` below the target (above it when
+cooling), held there for `hold`, and the cap then rises `ramp_rate` per minute
+until it reaches the top of the output range. Heating to 20°C with an offset of
+1.5, the device is given 18.5, and after the hold the setpoint rises toward 20.
 
 ```yaml
     pid:
       kp: 0.9
       soft_start:
-        margin: 0.5
+        initial_offset: 1.5
         hold: 4min
         ramp_rate: 0.1
 ```
+
+The PID keeps running underneath, and the device gets the lower of the PID's
+setpoint and the cap, so the PID takes over as soon as it asks for less,
+typically as the room nears the target. While the cap holds the PID back its
+integral does not accumulate, and the cap rises rather than being released, so
+the setpoint never jumps when the hold ends.
 
 Demand begins when the workflow switches the device on, when the target moves
 towards more output, and when the room crosses the target while the device is
@@ -246,22 +251,23 @@ on but idle (where the device would otherwise start on its own). A device that
 is already running when demand begins is kept at its current output and raised
 from there, never stopped.
 
-The start point is learned, per mode: the device's call (setpoint minus room
-temperature when heating, room minus setpoint when cooling) at the moment it
-begins operating during a soft start. Each soft start begins `margin` below it,
-so how far below the target a start begins follows from what was learned and
-how far the room is from the target. A device that starts as soon as it is
-switched on, wherever its setpoint is, starts during the hold, and each soft
-start then begins lower. The start points are saved like the room model (kept
-across flashes until `initial_start_point` changes) and published as
-`Soft start point heating` / `Soft start point cooling`; `Soft start active`
-shows when the cap applies.
+The offset is learned per mode from each soft start's overshoot: how far the
+room went past the target, from the start until the device has stopped and
+10 more minutes have passed (at most 90 minutes). More than 0.25°C of overshoot
+starts the next one lower, by half the excess; no more than that starts it
+0.1°C higher, so the offset settles at the smallest one that avoids
+overshoot. It stays between 0 and `max_adjustment_under`. A measurement is
+dropped when the target or mode changes, when the soft start is switched off,
+or when the device never ran. The offsets are saved like the room model (kept
+across flashes until `initial_offset` changes) and published as
+`Soft start offset heating` / `Soft start offset cooling`, with the last
+measured overshoot as `Soft start overshoot`; `Soft start active` shows when
+the cap applies.
 
 | `soft_start` option | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | State at boot. `set_soft_start_enabled()` switches it while running. |
-| `initial_start_point` | `0.0` | Seed of the learned start point, °C of call (-3 to 3). |
-| `margin` | `0.5` | How far below the start point a soft start begins. |
+| `initial_offset` | `1.5` | How far below the target (above it when cooling) a soft start begins before anything is learned, °C (0 to 3). |
 | `hold` | `4min` | How long the cap stays at its starting point. |
 | `ramp_rate` | `0.1` | °C per minute the cap rises after the hold. |
 
@@ -361,6 +367,6 @@ Layout of `components/workflow_climate/`:
 - `hysterisis_workflowstep.*`, `pid_workflowstep.*`, `adaptive_pid.*`: the controller.
 - `room_model.h`: the learned room model and the output estimate; no ESPHome dependency.
 - `tuning_rule.h`: the gains that follow from the model; no ESPHome dependency.
-- `soft_start.h`: the soft start cap and its learned start points; no ESPHome dependency.
+- `soft_start.h`: the soft start cap and its learned offsets; no ESPHome dependency.
 - `tuning_store.h`: whether each learned value starts from what was learned or its seed at boot; no ESPHome dependency.
 - `controller_types.h`: the interface between the controller and the device.

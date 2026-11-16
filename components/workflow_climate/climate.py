@@ -60,12 +60,12 @@ CONF_DEAD_TIME_COOLING = "dead_time_cooling"
 
 CONF_SOFT_START = "soft_start"
 CONF_ENABLED = "enabled"
-CONF_INITIAL_START_POINT = "initial_start_point"
-CONF_MARGIN = "margin"
+CONF_INITIAL_OFFSET = "initial_offset"
 CONF_HOLD = "hold"
 CONF_RAMP_RATE = "ramp_rate"
-CONF_SOFT_START_POINT_HEATING = "soft_start_point_heating"
-CONF_SOFT_START_POINT_COOLING = "soft_start_point_cooling"
+CONF_SOFT_START_OFFSET_HEATING = "soft_start_offset_heating"
+CONF_SOFT_START_OFFSET_COOLING = "soft_start_offset_cooling"
+CONF_SOFT_START_OVERSHOOT = "soft_start_overshoot"
 CONF_SOFT_START_ACTIVE = "soft_start_active"
 
 workflow_climate_ns = cg.esphome_ns.namespace("workflow_climate")
@@ -73,19 +73,18 @@ WorkflowClimate = workflow_climate_ns.class_(
     "WorkflowClimate", climate.Climate, cg.Component
 )
 
-# When demand begins, cap the PID's output just below the learned point at
-# which the device starts, hold, then raise the cap gradually (soft_start.h).
+# When demand begins, cap the device setpoint a learned offset below the
+# target (above it when cooling), hold, then raise the cap gradually
+# (soft_start.h).
 SOFT_START_SCHEMA = cv.Schema(
     {
         # State at boot; set_soft_start_enabled() switches it at runtime.
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
-        # Seed of the learned start point: how far the device setpoint is past
-        # the room temperature (heating; mirrored for cooling) when it starts.
-        cv.Optional(CONF_INITIAL_START_POINT, default=0.0): cv.float_range(
-            min=-3.0, max=3.0
+        # How far below the target a soft start begins, before anything is
+        # learned. The offset is then learned from each soft start's overshoot.
+        cv.Optional(CONF_INITIAL_OFFSET, default=1.5): cv.float_range(
+            min=0.0, max=3.0
         ),
-        # How far below the start point a soft start begins.
-        cv.Optional(CONF_MARGIN, default=0.5): cv.float_range(min=0.0, max=3.0),
         cv.Optional(CONF_HOLD, default="4min"): cv.positive_time_period_milliseconds,
         # Degrees per minute the cap rises after the hold.
         cv.Optional(CONF_RAMP_RATE, default=0.1): cv.float_range(min=0.01, max=2.0),
@@ -229,12 +228,16 @@ CONFIG_SCHEMA = cv.All(
             ): _gain_sensor_schema(1, "min"),
             # Created when pid soft_start is configured.
             cv.Optional(
-                CONF_SOFT_START_POINT_HEATING,
-                default={CONF_NAME: "Soft start point heating"},
+                CONF_SOFT_START_OFFSET_HEATING,
+                default={CONF_NAME: "Soft start offset heating"},
             ): _gain_sensor_schema(2, UNIT_CELSIUS),
             cv.Optional(
-                CONF_SOFT_START_POINT_COOLING,
-                default={CONF_NAME: "Soft start point cooling"},
+                CONF_SOFT_START_OFFSET_COOLING,
+                default={CONF_NAME: "Soft start offset cooling"},
+            ): _gain_sensor_schema(2, UNIT_CELSIUS),
+            cv.Optional(
+                CONF_SOFT_START_OVERSHOOT,
+                default={CONF_NAME: "Soft start overshoot"},
             ): _gain_sensor_schema(2, UNIT_CELSIUS),
             cv.Optional(
                 CONF_SOFT_START_ACTIVE, default={CONF_NAME: "Soft start active"}
@@ -297,8 +300,7 @@ async def to_code(config):
             soft = conf[CONF_SOFT_START]
             cg.add(var.set_soft_start_configured(True))
             cg.add(var.set_soft_start_enabled_at_boot(soft[CONF_ENABLED]))
-            cg.add(var.set_soft_start_initial_start_point(soft[CONF_INITIAL_START_POINT]))
-            cg.add(var.set_soft_start_margin(soft[CONF_MARGIN]))
+            cg.add(var.set_soft_start_initial_offset(soft[CONF_INITIAL_OFFSET]))
             cg.add(var.set_soft_start_hold(soft[CONF_HOLD]))
             cg.add(var.set_soft_start_ramp_rate(soft[CONF_RAMP_RATE]))
 
@@ -340,8 +342,9 @@ async def to_code(config):
                 cg.add(setter(await sensor.new_sensor(config[key])))
         if CONF_SOFT_START in config[CONF_PID]:
             for key, setter in (
-                (CONF_SOFT_START_POINT_HEATING, var.set_soft_start_point_heating_sensor),
-                (CONF_SOFT_START_POINT_COOLING, var.set_soft_start_point_cooling_sensor),
+                (CONF_SOFT_START_OFFSET_HEATING, var.set_soft_start_offset_heating_sensor),
+                (CONF_SOFT_START_OFFSET_COOLING, var.set_soft_start_offset_cooling_sensor),
+                (CONF_SOFT_START_OVERSHOOT, var.set_soft_start_overshoot_sensor),
             ):
                 cg.add(setter(await sensor.new_sensor(config[key])))
             cg.add(
