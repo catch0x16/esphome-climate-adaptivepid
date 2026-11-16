@@ -58,13 +58,43 @@ CONF_HEAT_LOSS = "heat_loss"
 CONF_DEAD_TIME_HEATING = "dead_time_heating"
 CONF_DEAD_TIME_COOLING = "dead_time_cooling"
 
+CONF_SOFT_START = "soft_start"
+CONF_ENABLED = "enabled"
+CONF_INITIAL_START_POINT = "initial_start_point"
+CONF_MARGIN = "margin"
+CONF_HOLD = "hold"
+CONF_RAMP_RATE = "ramp_rate"
+CONF_SOFT_START_POINT_HEATING = "soft_start_point_heating"
+CONF_SOFT_START_POINT_COOLING = "soft_start_point_cooling"
+CONF_SOFT_START_ACTIVE = "soft_start_active"
+
 workflow_climate_ns = cg.esphome_ns.namespace("workflow_climate")
 WorkflowClimate = workflow_climate_ns.class_(
     "WorkflowClimate", climate.Climate, cg.Component
 )
 
+# When demand begins, cap the PID's output just below the learned point at
+# which the device starts, hold, then raise the cap gradually (soft_start.h).
+SOFT_START_SCHEMA = cv.Schema(
+    {
+        # State at boot; set_soft_start_enabled() switches it at runtime.
+        cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+        # Seed of the learned start point: how far the device setpoint is past
+        # the room temperature (heating; mirrored for cooling) when it starts.
+        cv.Optional(CONF_INITIAL_START_POINT, default=0.0): cv.float_range(
+            min=-3.0, max=3.0
+        ),
+        # How far below the start point a soft start begins.
+        cv.Optional(CONF_MARGIN, default=0.5): cv.float_range(min=0.0, max=3.0),
+        cv.Optional(CONF_HOLD, default="4min"): cv.positive_time_period_milliseconds,
+        # Degrees per minute the cap rises after the hold.
+        cv.Optional(CONF_RAMP_RATE, default=0.1): cv.float_range(min=0.01, max=2.0),
+    }
+)
+
 PID_SCHEMA = cv.Schema(
     {
+        cv.Optional(CONF_SOFT_START): SOFT_START_SCHEMA,
         cv.Optional(CONF_KP, default=0.0): cv.float_,
         cv.Optional(CONF_KI, default=0.0): cv.float_,
         cv.Optional(CONF_KD, default=0.0): cv.float_,
@@ -197,6 +227,18 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_DEAD_TIME_COOLING, default={CONF_NAME: "Dead time cooling"}
             ): _gain_sensor_schema(1, "min"),
+            # Created when pid soft_start is configured.
+            cv.Optional(
+                CONF_SOFT_START_POINT_HEATING,
+                default={CONF_NAME: "Soft start point heating"},
+            ): _gain_sensor_schema(2, UNIT_CELSIUS),
+            cv.Optional(
+                CONF_SOFT_START_POINT_COOLING,
+                default={CONF_NAME: "Soft start point cooling"},
+            ): _gain_sensor_schema(2, UNIT_CELSIUS),
+            cv.Optional(
+                CONF_SOFT_START_ACTIVE, default={CONF_NAME: "Soft start active"}
+            ): _power_sensor_schema(DEVICE_CLASS_RUNNING),
         }
     )
     .extend(cv.COMPONENT_SCHEMA),
@@ -251,6 +293,14 @@ async def to_code(config):
             cg.add(var.set_initial_cool_rate(conf[CONF_INITIAL_COOL_RATE]))
         if CONF_INITIAL_HEAT_LOSS in conf:
             cg.add(var.set_initial_heat_loss(conf[CONF_INITIAL_HEAT_LOSS]))
+        if CONF_SOFT_START in conf:
+            soft = conf[CONF_SOFT_START]
+            cg.add(var.set_soft_start_configured(True))
+            cg.add(var.set_soft_start_enabled_at_boot(soft[CONF_ENABLED]))
+            cg.add(var.set_soft_start_initial_start_point(soft[CONF_INITIAL_START_POINT]))
+            cg.add(var.set_soft_start_margin(soft[CONF_MARGIN]))
+            cg.add(var.set_soft_start_hold(soft[CONF_HOLD]))
+            cg.add(var.set_soft_start_ramp_rate(soft[CONF_RAMP_RATE]))
 
     if CONF_HYSTERESIS in config:
         conf = config[CONF_HYSTERESIS]
@@ -288,3 +338,14 @@ async def to_code(config):
                 (CONF_DEAD_TIME_COOLING, var.set_dead_time_cooling_sensor),
             ):
                 cg.add(setter(await sensor.new_sensor(config[key])))
+        if CONF_SOFT_START in config[CONF_PID]:
+            for key, setter in (
+                (CONF_SOFT_START_POINT_HEATING, var.set_soft_start_point_heating_sensor),
+                (CONF_SOFT_START_POINT_COOLING, var.set_soft_start_point_cooling_sensor),
+            ):
+                cg.add(setter(await sensor.new_sensor(config[key])))
+            cg.add(
+                var.set_soft_start_active_sensor(
+                    await binary_sensor.new_binary_sensor(config[CONF_SOFT_START_ACTIVE])
+                )
+            )

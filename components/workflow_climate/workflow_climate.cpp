@@ -224,6 +224,60 @@ void WorkflowClimate::save_tuning_(uint32_t now, bool force) {
 void WorkflowClimate::on_safe_shutdown() {
   // Runs before the preferences are synced to flash on an OTA or safe reboot.
   this->save_tuning_(millis(), true);
+  this->save_soft_start_(millis(), true);
+}
+
+void WorkflowClimate::load_soft_start_() {
+  if (this->pid_step_ == nullptr || !this->soft_start_configured_) {
+    return;
+  }
+  using workflow::pid::SoftStart;
+  const float seed = SoftStart::clamp_start_point(this->soft_start_.initial_start_point);
+  this->stored_soft_start_ = StoredSoftStart{SOFT_START_VERSION, NAN, NAN, NAN};
+  StoredSoftStart loaded{};
+  if (this->soft_start_preference_.load(&loaded) && loaded.version == SOFT_START_VERSION) {
+    this->stored_soft_start_ = loaded;
+  }
+  const auto heat = workflow::pid::resolve(this->stored_soft_start_.heat, this->stored_soft_start_.seed, seed,
+                                           SoftStart::MIN_START_POINT, SoftStart::MAX_START_POINT);
+  const auto cool = workflow::pid::resolve(this->stored_soft_start_.cool, this->stored_soft_start_.seed, seed,
+                                           SoftStart::MIN_START_POINT, SoftStart::MAX_START_POINT);
+  this->pid_step_->setSoftStartPoint(true, heat.value);
+  this->pid_step_->setSoftStartPoint(false, cool.value);
+  // Both are stored against one seed, so they come back together or not at all.
+  this->soft_start_source_ = heat.source;
+  ESP_LOGI(TAG, "Soft start points: heating %.2f C, cooling %.2f C (%s, seed %.2f C)", heat.value, cool.value,
+           workflow::pid::tuning_source_to_string(heat.source), seed);
+  this->save_soft_start_(millis(), true);
+}
+
+void WorkflowClimate::save_soft_start_(uint32_t now, bool force) {
+  if (this->pid_step_ == nullptr || !this->soft_start_configured_) {
+    return;
+  }
+  const StoredSoftStart current{SOFT_START_VERSION, this->pid_step_->softStartPoint(true),
+                                this->pid_step_->softStartPoint(false),
+                                workflow::pid::SoftStart::clamp_start_point(this->soft_start_.initial_start_point)};
+  if (current.heat == this->stored_soft_start_.heat && current.cool == this->stored_soft_start_.cool &&
+      current.seed == this->stored_soft_start_.seed) {
+    return;
+  }
+  if (!force && static_cast<uint32_t>(now - this->last_soft_start_save_) < TUNING_SAVE_INTERVAL_MS) {
+    return;
+  }
+  this->stored_soft_start_ = current;
+  this->soft_start_preference_.save(&this->stored_soft_start_);
+  this->last_soft_start_save_ = now;
+}
+
+void WorkflowClimate::set_soft_start_enabled(bool enabled) {
+  if (this->pid_step_ == nullptr || !this->soft_start_configured_) {
+    ESP_LOGW(TAG, "set_soft_start_enabled: soft_start is not configured");
+    return;
+  }
+  this->soft_start_.enabled = enabled;
+  this->pid_step_->setSoftStartEnabled(enabled);
+  this->publish_diagnostics_();
 }
 
 void WorkflowClimate::reset_tuning() {
@@ -296,12 +350,17 @@ void WorkflowClimate::setup() {
       this->mark_failed();
       return;
     }
+    if (this->soft_start_configured_) {
+      this->pid_step_->setSoftStart(this->soft_start_);
+    }
   }
 
   this->targets_preference_ = this->make_entity_preference<StoredTargets>(0x57464C57UL);
   this->load_targets_();
   this->tuning_preference_ = this->make_entity_preference<StoredTuning>(TUNING_PREFERENCE_TYPE);
   this->load_tuning_();
+  this->soft_start_preference_ = this->make_entity_preference<StoredSoftStart>(SOFT_START_PREFERENCE_TYPE);
+  this->load_soft_start_();
   this->restored_state_ = this->restore_state_();
   this->compatible_ = true;
 
@@ -505,6 +564,7 @@ void WorkflowClimate::run_workflows_() {
                                                : NAN);
     this->pid_step_->run(current, &this->device_);
     this->save_tuning_(millis(), false);
+    this->save_soft_start_(millis(), false);
   } else {
     this->device_.sync_target();
   }
@@ -652,6 +712,11 @@ void WorkflowClimate::publish_diagnostics_() {
     publish_value(this->heat_loss_sensor_, per_hour(m.loss));
     publish_value(this->dead_time_heating_sensor_, m.heat_dead_s / 60.0f);
     publish_value(this->dead_time_cooling_sensor_, m.cool_dead_s / 60.0f);
+    if (this->soft_start_configured_) {
+      publish_value(this->soft_start_point_heating_sensor_, this->pid_step_->softStartPoint(true));
+      publish_value(this->soft_start_point_cooling_sensor_, this->pid_step_->softStartPoint(false));
+      publish_binary(this->soft_start_active_sensor_, this->pid_step_->softStartActive());
+    }
   }
 }
 
@@ -686,6 +751,18 @@ void WorkflowClimate::dump_config() {
       }
     } else {
       ESP_LOGCONFIG(TAG, "  PID tuning: fixed gains");
+    }
+    if (this->soft_start_configured_ && this->pid_step_ != nullptr) {
+      ESP_LOGCONFIG(TAG,
+                    "  Soft start: %s, start point heating %.2f C, cooling %.2f C (%s, seed %.2f C), margin %.2f C, "
+                    "hold %u s, ramp %.2f C/min",
+                    this->pid_step_->softStartEnabled() ? "enabled" : "disabled", this->pid_step_->softStartPoint(true),
+                    this->pid_step_->softStartPoint(false),
+                    workflow::pid::tuning_source_to_string(this->soft_start_source_),
+                    this->soft_start_.initial_start_point, this->soft_start_.margin,
+                    static_cast<unsigned>(this->soft_start_.hold_ms / 1000), this->soft_start_.rate_per_s * 60.0f);
+    } else {
+      ESP_LOGCONFIG(TAG, "  Soft start: not configured");
     }
     this->warn_if_off_step_("pid max_adjustment_under", this->max_adjustment_under_);
     this->warn_if_off_step_("pid max_adjustment_over", this->max_adjustment_over_);

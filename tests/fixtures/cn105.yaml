@@ -67,6 +67,8 @@ climate:
       kd: 0.0
       max_adjustment_under: 2.0
       max_adjustment_over: 2.0
+      soft_start:
+        margin: 0.5
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5

@@ -9,6 +9,7 @@ AdaptivePID::AdaptivePID(float kp_init, float ki_init, float kd_init)
       _last_update_ms(0),
       _has_state(false),
       _output_min_offset(-2.0f), _output_max_offset(2.0f),
+      _output_cap(INFINITY),
       _target(0.0f), _heating(true),
       _deadband(0.0f)
 {
@@ -101,12 +102,24 @@ float AdaptivePID::update(float current_temp, uint32_t current_time_ms, bool sys
     const float p = _kp * error;
     const float d = _kd * derivative;
 
+    // The output cap, as an offset limit: below max when heating, above min
+    // when cooling (more cooling is a lower setpoint).
+    float max_offset = _output_max_offset;
+    float min_offset = _output_min_offset;
+    if (std::isfinite(_output_cap)) {
+        if (_heating) {
+            max_offset = std::max(std::min(max_offset, _output_cap), min_offset);
+        } else {
+            min_offset = std::min(std::max(min_offset, -_output_cap), max_offset);
+        }
+    }
+
     // Integral with anti-windup: while the output is pinned at a limit, error
     // that would push it further past that limit is not accumulated.
     const float candidate_integral = _integral + error * dt;
     const float candidate_output = p + _ki * candidate_integral + d;
-    const bool winding_up = (candidate_output > _output_max_offset && error > 0.0f) ||
-                            (candidate_output < _output_min_offset && error < 0.0f);
+    const bool winding_up = (candidate_output > max_offset && error > 0.0f) ||
+                            (candidate_output < min_offset && error < 0.0f);
     if (!winding_up) {
         _integral = candidate_integral;
     }
@@ -114,8 +127,8 @@ float AdaptivePID::update(float current_temp, uint32_t current_time_ms, bool sys
 
     // offset = Kp*e + Ki*integral + Kd*derivative, limited to the allowed range
     float offset = p + _ki * _integral + d;
-    if (offset < _output_min_offset) offset = _output_min_offset;
-    if (offset > _output_max_offset) offset = _output_max_offset;
+    if (offset < min_offset) offset = min_offset;
+    if (offset > max_offset) offset = max_offset;
 
     // Update state
     _prev_error = error;

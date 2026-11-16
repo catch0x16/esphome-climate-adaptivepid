@@ -221,6 +221,66 @@ estimate: rates learned from full-output and from partial-output windows should
 agree. Usage is at the top of the file. The export holds states only, so
 defrost is not visible there and is caught only as wrong-way windows.
 
+### Soft start
+
+A heat pump's own controller decides when to run, and how hard, from how far
+its setpoint is past its room reading. Handed the full proportional correction
+at a start, a unit that is large for its room overshoots. With `soft_start`,
+when demand begins the PID's output is capped just below the point at which the
+device starts, held there, and the cap is then raised gradually. Below the cap
+the PID runs as usual, and while the cap holds it back its integral does not
+accumulate, so nothing jumps when the cap lifts.
+
+```yaml
+    pid:
+      kp: 0.9
+      soft_start:
+        margin: 0.5
+        hold: 4min
+        ramp_rate: 0.1
+```
+
+Demand begins when the workflow switches the device on, when the target moves
+towards more output, and when the room crosses the target while the device is
+on but idle (where the device would otherwise start on its own). A device that
+is already running when demand begins is kept at its current output and raised
+from there, never stopped.
+
+The start point is learned, per mode: the device's call (setpoint minus room
+temperature when heating, room minus setpoint when cooling) at the moment it
+begins operating during a soft start. Each soft start begins `margin` below it,
+so how far below the target a start begins follows from what was learned and
+how far the room is from the target. A device that starts as soon as it is
+switched on, wherever its setpoint is, starts during the hold, and each soft
+start then begins lower. The start points are saved like the room model (kept
+across flashes until `initial_start_point` changes) and published as
+`Soft start point heating` / `Soft start point cooling`; `Soft start active`
+shows when the cap applies.
+
+| `soft_start` option | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | State at boot. `set_soft_start_enabled()` switches it while running. |
+| `initial_start_point` | `0.0` | Seed of the learned start point, °C of call (-3 to 3). |
+| `margin` | `0.5` | How far below the start point a soft start begins. |
+| `hold` | `4min` | How long the cap stays at its starting point. |
+| `ramp_rate` | `0.1` | °C per minute the cap rises after the hold. |
+
+To switch it from Home Assistant, for instance to compare nights with and
+without it:
+
+```yaml
+switch:
+  - platform: template
+    name: "Soft start"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    turn_on_action:
+      - lambda: id(hvac_workflow).set_soft_start_enabled(true);
+    turn_off_action:
+      - lambda: id(hvac_workflow).set_soft_start_enabled(false);
+```
+
 ## Behaviour
 
 - The workflows run in `HEAT` and `COOL`. In every other mode, and for fan,
@@ -278,6 +338,10 @@ c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_room_mod
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_store \
   tests/test_tuning_store.cpp && /tmp/test_tuning_store
 
+# Soft start and the PID output cap, no ESPHome needed
+c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_soft_start \
+  tests/test_soft_start.cpp components/workflow_climate/adaptive_pid.cpp && /tmp/test_soft_start
+
 # Host build against the demo climate
 esphome compile test.yaml
 
@@ -297,5 +361,6 @@ Layout of `components/workflow_climate/`:
 - `hysterisis_workflowstep.*`, `pid_workflowstep.*`, `adaptive_pid.*`: the controller.
 - `room_model.h`: the learned room model and the output estimate; no ESPHome dependency.
 - `tuning_rule.h`: the gains that follow from the model; no ESPHome dependency.
+- `soft_start.h`: the soft start cap and its learned start points; no ESPHome dependency.
 - `tuning_store.h`: whether each learned value starts from what was learned or its seed at boot; no ESPHome dependency.
 - `controller_types.h`: the interface between the controller and the device.

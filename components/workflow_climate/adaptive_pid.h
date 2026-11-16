@@ -36,6 +36,12 @@ public:
     // Allowed setpoint offset around the target: min_offset <= 0 <= max_offset.
     void set_output_limits(float min_offset, float max_offset);
 
+    // An extra limit in the direction of more output (more heating when
+    // heating, more cooling when cooling), which may be below zero: the output
+    // asks for at most `cap` degrees more than the target, or -cap less. While
+    // it binds the integral does not accumulate. +infinity removes it.
+    void set_output_cap(float cap) { _output_cap = cap; }
+
     // Replace kp and ki while running. The integral is rescaled so the integral
     // term, and with it the output, does not jump.
     void set_gains(float kp, float ki);
@@ -67,6 +73,7 @@ private:
 
     // Output & behavior config
     float _output_min_offset, _output_max_offset;
+    float _output_cap;
     float _target;
     bool _heating;   // true: heating, false: cooling. Informational: the error sign already handles both.
     float _deadband;

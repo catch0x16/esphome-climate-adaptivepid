@@ -47,6 +47,9 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_heat_loss_sensor(sensor::Sensor *sensor) { this->heat_loss_sensor_ = sensor; }
   void set_dead_time_heating_sensor(sensor::Sensor *sensor) { this->dead_time_heating_sensor_ = sensor; }
   void set_dead_time_cooling_sensor(sensor::Sensor *sensor) { this->dead_time_cooling_sensor_ = sensor; }
+  void set_soft_start_point_heating_sensor(sensor::Sensor *sensor) { this->soft_start_point_heating_sensor_ = sensor; }
+  void set_soft_start_point_cooling_sensor(sensor::Sensor *sensor) { this->soft_start_point_cooling_sensor_ = sensor; }
+  void set_soft_start_active_sensor(binary_sensor::BinarySensor *sensor) { this->soft_start_active_sensor_ = sensor; }
 
   void set_update_interval(uint32_t value) { this->update_interval_ = value; }
   void set_settle_time(uint32_t value) { this->settle_ms_ = value; }
@@ -68,6 +71,13 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_initial_heat_rate(float per_hour) { this->initial_heat_rate_ = per_hour / 3600.0f; }
   void set_initial_cool_rate(float per_hour) { this->initial_cool_rate_ = per_hour / 3600.0f; }
   void set_initial_heat_loss(float per_hour) { this->initial_heat_loss_ = per_hour / 3600.0f; }
+  // Soft start (soft_start.h). `enabled` is the state at boot; set_soft_start_enabled() changes it at runtime.
+  void set_soft_start_configured(bool value) { this->soft_start_configured_ = value; }
+  void set_soft_start_enabled_at_boot(bool value) { this->soft_start_.enabled = value; }
+  void set_soft_start_initial_start_point(float value) { this->soft_start_.initial_start_point = value; }
+  void set_soft_start_margin(float value) { this->soft_start_.margin = value; }
+  void set_soft_start_hold(uint32_t ms) { this->soft_start_.hold_ms = ms; }
+  void set_soft_start_ramp_rate(float per_minute) { this->soft_start_.rate_per_s = per_minute / 60.0f; }
 
   void set_hysteresis_enabled(bool value) { this->hysteresis_enabled_ = value; }
   void set_hysteresis_on(float value) { this->hysteresis_on_ = value; }
@@ -85,6 +95,10 @@ class WorkflowClimate : public Component, public climate::Climate {
 
   // Forget the learned room model and start from the configured seeds.
   void reset_tuning();
+
+  // Switch the soft start on or off while running, e.g. from a template switch.
+  void set_soft_start_enabled(bool enabled);
+  bool soft_start_enabled() const { return this->pid_step_ != nullptr && this->pid_step_->softStartEnabled(); }
 
  protected:
   static constexpr uint32_t TARGETS_VERSION = 1;
@@ -124,6 +138,18 @@ class WorkflowClimate : public Component, public climate::Climate {
   // At most one flash write per this interval.
   static constexpr uint32_t TUNING_SAVE_INTERVAL_MS = 60 * 60 * 1000;
 
+  // The learned soft start points (call at which the device starts), with the
+  // seed they were learned from. Kept apart from StoredTuning so that record
+  // and its migrations are unchanged.
+  static constexpr uint32_t SOFT_START_VERSION = 1;
+  static constexpr uint32_t SOFT_START_PREFERENCE_TYPE = 0x57465353UL;
+  struct StoredSoftStart {
+    uint32_t version;
+    float heat;
+    float cool;
+    float seed;
+  };
+
   climate::ClimateTraits traits() override { return this->traits_; }
   void control(const climate::ClimateCall &call) override;
 
@@ -142,6 +168,8 @@ class WorkflowClimate : public Component, public climate::Climate {
   // once per TUNING_SAVE_INTERVAL_MS.
   void save_tuning_(uint32_t now, bool force);
   void log_model_(const char *prefix) const;
+  void load_soft_start_();
+  void save_soft_start_(uint32_t now, bool force);
 
   bool is_workflow_mode_(climate::ClimateMode mode) const {
     return mode == climate::CLIMATE_MODE_HEAT || mode == climate::CLIMATE_MODE_COOL;
@@ -176,6 +204,9 @@ class WorkflowClimate : public Component, public climate::Climate {
   sensor::Sensor *heat_loss_sensor_{nullptr};
   sensor::Sensor *dead_time_heating_sensor_{nullptr};
   sensor::Sensor *dead_time_cooling_sensor_{nullptr};
+  sensor::Sensor *soft_start_point_heating_sensor_{nullptr};
+  sensor::Sensor *soft_start_point_cooling_sensor_{nullptr};
+  binary_sensor::BinarySensor *soft_start_active_sensor_{nullptr};
 
   climate::ClimateTraits traits_;
   ClimateDeviceAdapter device_;
@@ -194,6 +225,13 @@ class WorkflowClimate : public Component, public climate::Climate {
     workflow::pid::TuningSource loss, heat_rate, cool_rate, heat_dead, cool_dead;
   };
   ModelSources sources_{};
+
+  bool soft_start_configured_{false};
+  workflow::pid::SoftStartConfig soft_start_{};
+  ESPPreferenceObject soft_start_preference_;
+  StoredSoftStart stored_soft_start_{};
+  uint32_t last_soft_start_save_{0};
+  workflow::pid::TuningSource soft_start_source_{workflow::pid::TuningSource::SEEDED};
 
   optional<climate::ClimateDeviceRestoreState> restored_state_;
   ESPPreferenceObject targets_preference_;
