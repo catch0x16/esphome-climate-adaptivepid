@@ -62,7 +62,6 @@ CONF_SOFT_START = "soft_start"
 CONF_ENABLED = "enabled"
 CONF_INITIAL_OFFSET = "initial_offset"
 CONF_HOLD = "hold"
-CONF_RAMP_RATE = "ramp_rate"
 CONF_SOFT_START_OFFSET_HEATING = "soft_start_offset_heating"
 CONF_SOFT_START_OFFSET_COOLING = "soft_start_offset_cooling"
 CONF_SOFT_START_OVERSHOOT = "soft_start_overshoot"
@@ -74,8 +73,8 @@ WorkflowClimate = workflow_climate_ns.class_(
 )
 
 # When demand begins, cap the device setpoint a learned offset below the
-# target (above it when cooling), hold, then raise the cap gradually
-# (soft_start.h).
+# target (above it when cooling) and let the cap climb to the target over
+# `hold` (soft_start.h).
 SOFT_START_SCHEMA = cv.Schema(
     {
         # State at boot; set_soft_start_enabled() switches it at runtime.
@@ -85,9 +84,9 @@ SOFT_START_SCHEMA = cv.Schema(
         cv.Optional(CONF_INITIAL_OFFSET, default=1.5): cv.float_range(
             min=0.0, max=3.0
         ),
-        cv.Optional(CONF_HOLD, default="4min"): cv.positive_time_period_milliseconds,
-        # Degrees per minute the cap rises after the hold.
-        cv.Optional(CONF_RAMP_RATE, default=0.1): cv.float_range(min=0.01, max=2.0),
+        # How long the cap takes to climb from the offset to the target; it
+        # keeps rising at that rate past the target until the PID takes over.
+        cv.Optional(CONF_HOLD, default="20min"): cv.positive_time_period_milliseconds,
     }
 )
 
@@ -302,7 +301,6 @@ async def to_code(config):
             cg.add(var.set_soft_start_enabled_at_boot(soft[CONF_ENABLED]))
             cg.add(var.set_soft_start_initial_offset(soft[CONF_INITIAL_OFFSET]))
             cg.add(var.set_soft_start_hold(soft[CONF_HOLD]))
-            cg.add(var.set_soft_start_ramp_rate(soft[CONF_RAMP_RATE]))
 
     if CONF_HYSTERESIS in config:
         conf = config[CONF_HYSTERESIS]

@@ -756,12 +756,11 @@ void WorkflowClimate::dump_config() {
     if (this->soft_start_configured_ && this->pid_step_ != nullptr) {
       ESP_LOGCONFIG(TAG,
                     "  Soft start: %s, offset below the target heating %.2f C, cooling %.2f C (%s, seed %.2f C), "
-                    "hold %u s, ramp %.2f C/min",
+                    "climbing to the target over %u s",
                     this->pid_step_->softStartEnabled() ? "enabled" : "disabled", this->pid_step_->softStartOffset(true),
                     this->pid_step_->softStartOffset(false),
                     workflow::pid::tuning_source_to_string(this->soft_start_source_),
-                    this->soft_start_.initial_offset, static_cast<unsigned>(this->soft_start_.hold_ms / 1000),
-                    this->soft_start_.rate_per_s * 60.0f);
+                    this->soft_start_.initial_offset, static_cast<unsigned>(this->soft_start_.hold_ms / 1000));
     } else {
       ESP_LOGCONFIG(TAG, "  Soft start: not configured");
     }

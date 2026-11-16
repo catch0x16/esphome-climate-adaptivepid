@@ -10,6 +10,8 @@ AdaptivePID::AdaptivePID(float kp_init, float ki_init, float kd_init)
       _has_state(false),
       _output_min_offset(-2.0f), _output_max_offset(2.0f),
       _output_cap(INFINITY),
+      _output_bias(0.0f),
+      _raw_offset(0.0f),
       _target(0.0f), _heating(true),
       _deadband(0.0f)
 {
@@ -117,7 +119,7 @@ float AdaptivePID::update(float current_temp, uint32_t current_time_ms, bool sys
     // Integral with anti-windup: while the output is pinned at a limit, error
     // that would push it further past that limit is not accumulated.
     const float candidate_integral = _integral + error * dt;
-    const float candidate_output = p + _ki * candidate_integral + d;
+    const float candidate_output = p + _ki * candidate_integral + d + _output_bias;
     const bool winding_up = (candidate_output > max_offset && error > 0.0f) ||
                             (candidate_output < min_offset && error < 0.0f);
     if (!winding_up) {
@@ -125,8 +127,9 @@ float AdaptivePID::update(float current_temp, uint32_t current_time_ms, bool sys
     }
     clamp_integral();
 
-    // offset = Kp*e + Ki*integral + Kd*derivative, limited to the allowed range
-    float offset = p + _ki * _integral + d;
+    // offset = Kp*e + Ki*integral + Kd*derivative (+ bias), limited to the allowed range
+    _raw_offset = p + _ki * _integral + d;
+    float offset = _raw_offset + _output_bias;
     if (offset < min_offset) offset = min_offset;
     if (offset > max_offset) offset = max_offset;
 

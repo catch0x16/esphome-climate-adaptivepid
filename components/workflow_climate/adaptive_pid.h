@@ -42,6 +42,14 @@ public:
     // it binds the integral does not accumulate. +infinity removes it.
     void set_output_cap(float cap) { _output_cap = cap; }
 
+    // A bias added to the output (before the limits), for a bumpless hand-off:
+    // set to (wanted output - raw_offset()) the output continues from where it
+    // was handed over, and changes only as the room moves from there. 0 removes it.
+    void set_output_bias(float bias) { _output_bias = std::isfinite(bias) ? bias : 0.0f; }
+    float output_bias() const { return _output_bias; }
+    // The last update's kp*e + ki*integral + kd*derivative, before bias and limits.
+    float raw_offset() const { return _raw_offset; }
+
     // Replace kp and ki while running. The integral is rescaled so the integral
     // term, and with it the output, does not jump.
     void set_gains(float kp, float ki);
@@ -74,6 +82,8 @@ private:
     // Output & behavior config
     float _output_min_offset, _output_max_offset;
     float _output_cap;
+    float _output_bias;
+    float _raw_offset;
     float _target;
     bool _heating;   // true: heating, false: cooling. Informational: the error sign already handles both.
     float _deadband;

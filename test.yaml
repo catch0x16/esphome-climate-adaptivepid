@@ -78,8 +78,7 @@ climate:
       initial_cool_rate: 1.5
       soft_start:
         initial_offset: 1.5
-        hold: 4min
-        ramp_rate: 0.1
+        hold: 20min
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5

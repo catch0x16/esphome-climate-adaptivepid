@@ -77,7 +77,6 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_soft_start_enabled_at_boot(bool value) { this->soft_start_.enabled = value; }
   void set_soft_start_initial_offset(float value) { this->soft_start_.initial_offset = value; }
   void set_soft_start_hold(uint32_t ms) { this->soft_start_.hold_ms = ms; }
-  void set_soft_start_ramp_rate(float per_minute) { this->soft_start_.rate_per_s = per_minute / 60.0f; }
 
   void set_hysteresis_enabled(bool value) { this->hysteresis_enabled_ = value; }
   void set_hysteresis_on(float value) { this->hysteresis_on_ = value; }

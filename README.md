@@ -226,24 +226,34 @@ defrost is not visible there and is caught only as wrong-way windows.
 Handed the full proportional correction at a start, a heat pump that is large
 for its room overshoots. With `soft_start`, when demand begins the device
 setpoint is capped a learned `offset` below the target (above it when
-cooling), held there for `hold`, and the cap then rises `ramp_rate` per minute
-until it reaches the top of the output range. Heating to 20°C with an offset of
-1.5, the device is given 18.5, and after the hold the setpoint rises toward 20.
+cooling), and the cap climbs evenly to the target over `hold`: offset ÷ hold
+per minute. The device takes its setpoint in steps (0.5°C on a CN105 unit), so
+it sits at each step for a while. Heating to 20°C with an offset of 1 and a
+20 minute hold, the device is given 19.0, then 19.5 after about 10 minutes and
+20.0 after about 20. The cap keeps rising at the same rate past the target
+until the PID asks for less, so nothing jumps at the end.
 
 ```yaml
     pid:
       kp: 0.9
       soft_start:
-        initial_offset: 1.5
-        hold: 4min
-        ramp_rate: 0.1
+        initial_offset: 1.0
+        hold: 20min
 ```
 
-The PID keeps running underneath, and the device gets the lower of the PID's
-setpoint and the cap, so the PID takes over as soon as it asks for less,
-typically as the room nears the target. While the cap holds the PID back its
-integral does not accumulate, and the cap rises rather than being released, so
-the setpoint never jumps when the hold ends.
+The climb stops as soon as heat arrives: once the room has risen 0.15°C above
+its lowest reading since the soft start began (this does not rely on the
+device reporting that it runs). At that moment the PID takes over from the
+setpoint the device already has. Its own output then would be kp times the
+whole shortfall, which the slow start has made larger, just as the heat
+already on its way reaches the room; so it is given a bias of (cap − its
+output), and from there the setpoint moves only as the room moves: down as
+the room rises. The bias fades to zero over `hold`, giving the PID back its
+full authority if the room stalls.
+
+If heat has not arrived by the time the cap no longer holds the PID back, the
+PID simply continues below it. While the cap holds the PID back its integral
+does not accumulate.
 
 Demand begins when the workflow switches the device on, when the target moves
 towards more output, and when the room crosses the target while the device is
@@ -251,25 +261,30 @@ on but idle (where the device would otherwise start on its own). A device that
 is already running when demand begins is kept at its current output and raised
 from there, never stopped.
 
-The offset is learned per mode from each soft start's overshoot: how far the
-room went past the target, from the start until the device has stopped and
-10 more minutes have passed (at most 90 minutes). More than 0.25°C of overshoot
+The offset is learned per mode from each soft start's overshoot: the room's
+peak past the target, from the start until 30 minutes after the cap lifts or
+10 minutes after the device is switched off, whichever comes first (at most
+90 minutes). It does not depend on the device reporting that it runs, since a
+unit can deliver heat while reporting idle. More than 0.25°C of overshoot
 starts the next one lower, by half the excess; no more than that starts it
-0.1°C higher, so the offset settles at the smallest one that avoids
-overshoot. It stays between 0 and `max_adjustment_under`. A measurement is
-dropped when the target or mode changes, when the soft start is switched off,
-or when the device never ran. The offsets are saved like the room model (kept
-across flashes until `initial_offset` changes) and published as
-`Soft start offset heating` / `Soft start offset cooling`, with the last
+0.1°C higher, so the offset settles at the smallest one that avoids overshoot.
+It stays between 0 and `max_adjustment_under`. A measurement is dropped when
+the target or mode changes, when new demand begins before the soft start has
+ended, or when the soft start is switched off. The offsets are saved like the
+room model (kept across flashes until `initial_offset` changes) and published
+as `Soft start offset heating` / `Soft start offset cooling`, with the last
 measured overshoot as `Soft start overshoot`; `Soft start active` shows when
 the cap applies.
+
+Corrections are rounded down to the device's step, so a target that is not on
+a step starts lower: 19.44 with an offset of 1 gives a cap of 18.44, which the
+device receives as 18.0.
 
 | `soft_start` option | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | State at boot. `set_soft_start_enabled()` switches it while running. |
 | `initial_offset` | `1.5` | How far below the target (above it when cooling) a soft start begins before anything is learned, °C (0 to 3). |
-| `hold` | `4min` | How long the cap stays at its starting point. |
-| `ramp_rate` | `0.1` | °C per minute the cap rises after the hold. |
+| `hold` | `20min` | How long the cap takes to climb from the offset to the target, and the hand-off bias to fade. |
 
 To switch it from Home Assistant, for instance to compare nights with and
 without it:

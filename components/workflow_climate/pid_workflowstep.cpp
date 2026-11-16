@@ -117,7 +117,7 @@ namespace workflow {
             }
 
             // How far the room went past the target after the last soft start.
-            if (this->softStart.observe(now, heatingNow, currentTemperature, target, operating, maxOffset)) {
+            if (this->softStart.observe(now, heatingNow, currentTemperature, target, powerOn, maxOffset)) {
                 ESP_LOGI(TAG, "Soft start overshoot %.2f C: %s offset now %.2f C",
                     this->softStart.last_overshoot(), heatingNow ? "heating" : "cooling", this->softStart.offset(heatingNow));
             }
@@ -135,7 +135,7 @@ namespace workflow {
                 if (reason != nullptr && this->softStart.enabled()) {
                     // A running device is kept where it is and raised from there.
                     const float current = sign * (deviceSetpoint - target);
-                    this->softStart.arm(now, heatingNow, target, operating, current);
+                    this->softStart.arm(now, heatingNow, target, currentTemperature, operating, current);
                     ESP_LOGI(TAG, "Soft start (%s): output capped at %.2f C from the target (offset %.2f C)",
                         reason, this->softStart.cap(now, maxOutput), this->softStart.offset(heatingNow));
                 }
@@ -145,6 +145,16 @@ namespace workflow {
             this->previousPowerOn = powerOn;
             this->previousOperating = operating;
             this->previousDemand = demand;
+
+            // Heat has arrived: hand over to the PID from the setpoint the
+            // device has now, so its output continues from there.
+            if (powerOn && this->softStart.heat_arrived(currentTemperature)) {
+                const float pidOutput = sign * this->adaptivePID->raw_offset();
+                const float capNow = this->softStart.cap(now, maxOutput);
+                const float bias = this->softStart.hand_off(now, maxOutput, pidOutput);
+                ESP_LOGI(TAG, "Soft start: heat arrived, handing over at %.2f C from the target (PID %.2f C, bias %.2f C fading over %u s)",
+                    capNow, pidOutput, bias, static_cast<unsigned>(this->softStart.config().hold_ms / 1000));
+            }
             return this->softStart.cap(now, maxOutput);
         }
 
@@ -219,6 +229,8 @@ namespace workflow {
                 // accumulating once the setpoint is pinned at either end.
                 this->adaptivePID->set_output_limits(adjustedMinTemp - target, adjustedMaxTemp - target);
                 this->adaptivePID->set_output_cap(cap);
+                // After a soft start's hand-off; the bias is in output degrees, the PID's offset is not.
+                this->adaptivePID->set_output_bias((heatingDirection ? 1.0f : -1.0f) * this->softStart.bias(now));
                 const float setPointCorrectionSimple =
                     this->adaptivePID->update(currentTemperature, now, deviceManager->isInternalPowerOn());
                 const float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);
