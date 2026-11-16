@@ -18,6 +18,7 @@ AUTO_LOAD = ["binary_sensor", "climate", "sensor"]
 CONF_CLIMATE_ID = "climate_id"
 CONF_TEMPERATURE_SENSOR = "temperature_sensor"
 CONF_READY_SENSOR = "ready_sensor"
+CONF_OUTDOOR_TEMPERATURE_SENSOR = "outdoor_temperature_sensor"
 CONF_SETTLE_TIME = "settle_time"
 
 CONF_PID = "pid"
@@ -34,6 +35,9 @@ CONF_DEAD_TIME = "dead_time"
 CONF_FULL_OUTPUT_GAP = "full_output_gap"
 CONF_KP_MIN = "kp_min"
 CONF_KP_MAX = "kp_max"
+CONF_INITIAL_HEAT_RATE = "initial_heat_rate"
+CONF_INITIAL_COOL_RATE = "initial_cool_rate"
+CONF_INITIAL_HEAT_LOSS = "initial_heat_loss"
 
 CONF_HYSTERESIS = "hysteresis"
 CONF_ON_THRESHOLD = "on_threshold"
@@ -48,7 +52,11 @@ CONF_DEVICE_SET_POINT = "device_set_point"
 CONF_PID_SET_POINT = "pid_set_point"
 CONF_PID_KP = "pid_kp"
 CONF_PID_KI = "pid_ki"
-CONF_RESPONSE_RATE = "response_rate"
+CONF_HEATING_RATE = "heating_rate"
+CONF_COOLING_RATE = "cooling_rate"
+CONF_HEAT_LOSS = "heat_loss"
+CONF_DEAD_TIME_HEATING = "dead_time_heating"
+CONF_DEAD_TIME_COOLING = "dead_time_cooling"
 
 workflow_climate_ns = cg.esphome_ns.namespace("workflow_climate")
 WorkflowClimate = workflow_climate_ns.class_(
@@ -81,6 +89,14 @@ PID_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_KP_MIN, default=0.25): cv.float_range(min=0.01),
         cv.Optional(CONF_KP_MAX, default=4.0): cv.float_range(min=0.01),
+        # Starting values for the learned room model. Rates at full output in
+        # degrees per hour, per mode; without them both modes start from the
+        # rate the configured kp implies. Heat loss per hour (0.1: a drift of
+        # 1 C/h at 10 C indoor-outdoor difference). `dead_time` above is the
+        # starting dead time. A unit keeps what it learned until a seed changes.
+        cv.Optional(CONF_INITIAL_HEAT_RATE): cv.float_range(min=0.2, max=10.0),
+        cv.Optional(CONF_INITIAL_COOL_RATE): cv.float_range(min=0.2, max=10.0),
+        cv.Optional(CONF_INITIAL_HEAT_LOSS): cv.float_range(min=0.0, max=2.0),
     }
 )
 
@@ -131,6 +147,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_CLIMATE_ID): cv.use_id(climate.Climate),
             cv.Optional(CONF_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_READY_SENSOR): cv.use_id(binary_sensor.BinarySensor),
+            # Lets the room model learn heat loss and take it out of the
+            # heating and cooling rates.
+            cv.Optional(CONF_OUTDOOR_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(
                 CONF_UPDATE_INTERVAL, default="2s"
             ): cv.positive_time_period_milliseconds,
@@ -164,8 +183,20 @@ CONFIG_SCHEMA = cv.All(
                 5
             ),
             cv.Optional(
-                CONF_RESPONSE_RATE, default={CONF_NAME: "Response rate"}
+                CONF_HEATING_RATE, default={CONF_NAME: "Heating rate"}
             ): _gain_sensor_schema(2, "°C/h"),
+            cv.Optional(
+                CONF_COOLING_RATE, default={CONF_NAME: "Cooling rate"}
+            ): _gain_sensor_schema(2, "°C/h"),
+            cv.Optional(
+                CONF_HEAT_LOSS, default={CONF_NAME: "Heat loss"}
+            ): _gain_sensor_schema(3, "1/h"),
+            cv.Optional(
+                CONF_DEAD_TIME_HEATING, default={CONF_NAME: "Dead time heating"}
+            ): _gain_sensor_schema(1, "min"),
+            cv.Optional(
+                CONF_DEAD_TIME_COOLING, default={CONF_NAME: "Dead time cooling"}
+            ): _gain_sensor_schema(1, "min"),
         }
     )
     .extend(cv.COMPONENT_SCHEMA),
@@ -187,6 +218,9 @@ async def to_code(config):
     if CONF_READY_SENSOR in config:
         ready = await cg.get_variable(config[CONF_READY_SENSOR])
         cg.add(var.set_ready_sensor(ready))
+    if CONF_OUTDOOR_TEMPERATURE_SENSOR in config:
+        outdoor = await cg.get_variable(config[CONF_OUTDOOR_TEMPERATURE_SENSOR])
+        cg.add(var.set_outdoor_temperature_sensor(outdoor))
 
     update_interval = config[CONF_UPDATE_INTERVAL]
     cg.add(var.set_update_interval(update_interval))
@@ -211,6 +245,12 @@ async def to_code(config):
         cg.add(var.set_pid_full_output_gap(conf[CONF_FULL_OUTPUT_GAP]))
         cg.add(var.set_pid_kp_min(conf[CONF_KP_MIN]))
         cg.add(var.set_pid_kp_max(conf[CONF_KP_MAX]))
+        if CONF_INITIAL_HEAT_RATE in conf:
+            cg.add(var.set_initial_heat_rate(conf[CONF_INITIAL_HEAT_RATE]))
+        if CONF_INITIAL_COOL_RATE in conf:
+            cg.add(var.set_initial_cool_rate(conf[CONF_INITIAL_COOL_RATE]))
+        if CONF_INITIAL_HEAT_LOSS in conf:
+            cg.add(var.set_initial_heat_loss(conf[CONF_INITIAL_HEAT_LOSS]))
 
     if CONF_HYSTERESIS in config:
         conf = config[CONF_HYSTERESIS]
@@ -240,8 +280,11 @@ async def to_code(config):
         cg.add(var.set_pid_kp_sensor(await sensor.new_sensor(config[CONF_PID_KP])))
         cg.add(var.set_pid_ki_sensor(await sensor.new_sensor(config[CONF_PID_KI])))
         if config[CONF_PID][CONF_ADAPTIVE]:
-            cg.add(
-                var.set_response_rate_sensor(
-                    await sensor.new_sensor(config[CONF_RESPONSE_RATE])
-                )
-            )
+            for key, setter in (
+                (CONF_HEATING_RATE, var.set_heating_rate_sensor),
+                (CONF_COOLING_RATE, var.set_cooling_rate_sensor),
+                (CONF_HEAT_LOSS, var.set_heat_loss_sensor),
+                (CONF_DEAD_TIME_HEATING, var.set_dead_time_heating_sensor),
+                (CONF_DEAD_TIME_COOLING, var.set_dead_time_cooling_sensor),
+            ):
+                cg.add(setter(await sensor.new_sensor(config[key])))

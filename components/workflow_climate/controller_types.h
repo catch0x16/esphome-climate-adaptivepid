@@ -19,7 +19,8 @@ namespace devicestate {
   }
 
   struct DeviceStatus {
-    bool operating;
+    bool operating;    // actively running, defrost included
+    bool defrosting;   // running a defrost cycle: no heat reaches the room
     float currentTemperature;
   };
 

@@ -77,6 +77,7 @@ workflow::PowerEvent ClimateDeviceAdapter::observe(bool outer_on, uint32_t now) 
 devicestate::DeviceStatus ClimateDeviceAdapter::getDeviceStatus() {
   devicestate::DeviceStatus status{};
   status.operating = this->device_operating();
+  status.defrosting = this->inner_->action == climate::CLIMATE_ACTION_DEFROSTING;
   status.currentTemperature = this->inner_->current_temperature;
   return status;
 }

@@ -32,33 +32,43 @@ namespace workflow {
             this->maxAdjustmentOver = maxAdjustmentOver;
 
             this->tuning = tuning;
-            this->initialKi = i;
+            this->configuredKi = i;
+            this->useConfiguredKi[0] = i > 0.0f;
+            this->useConfiguredKi[1] = i > 0.0f;
             this->adaptivePID = new AdaptivePID(p, i, d);
 
             if (this->tuning.adaptive) {
-                // A configured kp is the starting point: it implies a response
-                // rate, which measurements then refine. Without one the
-                // estimator's default rate is used.
+                // A configured kp is the starting point: it implies a heating
+                // and cooling rate, which measurements then refine. Without one
+                // the model's default rate is used.
+                ModelState state = this->model.state();
                 if (p > 0.0f) {
-                    const float rate = rate_from_kp(p, this->tuning);
-                    this->estimator.set_rate(true, rate);
-                    this->estimator.set_rate(false, rate);
+                    state.heat_rate = rate_from_kp(p, this->tuning);
+                    state.cool_rate = state.heat_rate;
                 }
+                state.heat_dead_s = this->tuning.dead_time_s;
+                state.cool_dead_s = this->tuning.dead_time_s;
+                this->model.set_state(state);
                 this->applyTunedGains(true);
             }
         }
 
         void PidWorkflowStep::applyTunedGains(bool heating) {
-            const Gains gains = gains_from_rate(this->estimator.rate(heating), this->tuning);
-            // A configured ki is kept until the first measurement or restored rate.
-            const bool keepConfiguredKi = this->initialKi > 0.0f && this->estimator.measurements() == 0;
-            this->adaptivePID->set_gains(gains.kp, keepConfiguredKi ? this->initialKi : gains.ki);
+            const Gains gains = gains_from_rate(this->model.rate(heating), this->model.dead_time_s(heating), this->tuning);
+            const bool keepConfiguredKi = this->useConfiguredKi[heating ? 1 : 0];
+            this->adaptivePID->set_gains(gains.kp, keepConfiguredKi ? this->configuredKi : gains.ki);
         }
 
-        void PidWorkflowStep::restoreResponseRate(bool heating, float rate) {
-            this->estimator.set_rate(heating, rate);
-            this->initialKi = 0.0f;
+        void PidWorkflowStep::startModel(const ModelState &state, bool restoredHeat, bool restoredCool) {
+            this->model.set_state(state);
+            this->useConfiguredKi[1] = !restoredHeat && this->configuredKi > 0.0f;
+            this->useConfiguredKi[0] = !restoredCool && this->configuredKi > 0.0f;
             this->applyTunedGains(this->heating);
+        }
+
+        void PidWorkflowStep::resetTuning(const ModelState &seeds) {
+            this->model = RoomModel{};
+            this->startModel(seeds, false, false);
         }
 
         bool PidWorkflowStep::ensurePIDTarget(devicestate::IDeviceStateManager* deviceManager) {
@@ -84,17 +94,31 @@ namespace workflow {
             const bool updatedPidTarget = this->ensurePIDTarget(deviceManager);
 
             if (this->tuning.adaptive) {
-                // Learn how fast the room responds while the device is actively
-                // heating or cooling, and retune from it.
+                // Learn how the room responds, and retune from it.
                 const bool nowHeating = deviceManager->getOffsetDirection();
-                const bool operating = deviceManager->isInternalPowerOn() && deviceManager->getDeviceStatus().operating;
-                const bool measured = this->estimator.update(currentTemperature, operating, nowHeating, esphome::millis());
-                if (measured || nowHeating != this->heating) {
+                const devicestate::DeviceStatus status = deviceManager->getDeviceStatus();
+                const bool operating = deviceManager->isInternalPowerOn() && status.operating;
+                const float output = estimate_output(operating, nowHeating, deviceManager->getDeviceState().targetTemperature,
+                                                     currentTemperature, this->tuning.full_output_gap);
+                const ModelUpdate update = this->model.update(ModelSample{esphome::millis(), currentTemperature,
+                    this->outdoorTemperature, nowHeating, operating, output, operating && status.defrosting});
+                if (update.rate) {
+                    this->useConfiguredKi[nowHeating ? 1 : 0] = false;
+                }
+                if (update.loss) {
+                    ESP_LOGI(TAG, "Measured heat loss: %.3f /h", this->model.loss() * 3600.0f);
+                }
+                if (update.anomaly) {
+                    ESP_LOGI(TAG, "Dropped a %s window: the room moved the wrong way faster than with the device off",
+                        nowHeating ? "heating" : "cooling");
+                }
+                if (update.rate || update.dead_time || nowHeating != this->heating) {
                     this->heating = nowHeating;
                     this->applyTunedGains(nowHeating);
-                    if (measured) {
-                        ESP_LOGI(TAG, "Tuned from a measured %s rate of %.2f C/h: kp: %.3f  ki: %.5f  kd: %.3f",
-                            nowHeating ? "heating" : "cooling", this->estimator.rate(nowHeating) * 3600.0f,
+                    if (update.rate || update.dead_time) {
+                        ESP_LOGI(TAG, "Tuned from %s rate %.2f C/h, dead time %.1f min: kp: %.3f  ki: %.5f  kd: %.3f",
+                            nowHeating ? "heating" : "cooling", this->model.rate(nowHeating) * 3600.0f,
+                            this->model.dead_time_s(nowHeating) / 60.0f,
                             this->adaptivePID->kp(), this->adaptivePID->ki(), this->adaptivePID->kd());
                     }
                 }

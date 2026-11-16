@@ -116,39 +116,126 @@ void WorkflowClimate::load_targets_() {
   this->stored_targets_.version = TARGETS_VERSION;
 }
 
+// Per hour for logs and sensors, from per second.
+static float per_hour(float per_second) { return per_second * 3600.0f; }
+
 void WorkflowClimate::load_tuning_() {
-  this->stored_tuning_ = StoredTuning{TUNING_VERSION, NAN, NAN};
   if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
     return;
   }
+  using workflow::pid::ModelState;
+  using workflow::pid::Resolved;
+  using workflow::pid::RoomModel;
+  using workflow::pid::TuningSource;
+
+  this->seeds_.loss = std::isfinite(this->initial_heat_loss_) ? RoomModel::clamp_loss(this->initial_heat_loss_)
+                                                              : RoomModel::DEFAULT_LOSS;
+  this->seeds_.heat_rate = workflow::pid::configured_seed(this->initial_heat_rate_, this->kp_, this->tuning_);
+  this->seeds_.cool_rate = workflow::pid::configured_seed(this->initial_cool_rate_, this->kp_, this->tuning_);
+  this->seeds_.heat_dead_s = RoomModel::clamp_dead(this->tuning_.dead_time_s);
+  this->seeds_.cool_dead_s = this->seeds_.heat_dead_s;
+
+  // What is in flash, and the seeds it was learned from. NaN: nothing usable,
+  // so that value starts from its seed and the first save happens below.
+  const ModelState none{NAN, NAN, NAN, NAN, NAN};
+  this->stored_tuning_ = StoredTuning{TUNING_VERSION, none, none};
+  ModelState stored = none;
+  ModelState stored_seeds = none;
   StoredTuning loaded{};
-  if (this->tuning_preference_.load(&loaded) && loaded.version == TUNING_VERSION &&
-      std::isfinite(loaded.heat_rate) && std::isfinite(loaded.cool_rate) && loaded.heat_rate > 0.0f &&
-      loaded.cool_rate > 0.0f) {
-    this->pid_step_->restoreResponseRate(true, loaded.heat_rate);
-    this->pid_step_->restoreResponseRate(false, loaded.cool_rate);
+  if (this->tuning_preference_.load(&loaded) && loaded.version == TUNING_VERSION) {
     this->stored_tuning_ = loaded;
-    ESP_LOGI(TAG, "Restored learned response rates: heating %.2f C/h, cooling %.2f C/h", loaded.heat_rate * 3600.0f,
-             loaded.cool_rate * 3600.0f);
+    stored = loaded.model;
+    stored_seeds = loaded.seeds;
+  } else {
+    // Earlier versions learned response rates only; the rest starts from its seed.
+    StoredTuningV2 v2{};
+    StoredTuningV1 v1{};
+    if (this->make_entity_preference<StoredTuningV2>(TUNING_V2_PREFERENCE_TYPE).load(&v2) &&
+        v2.version == TUNING_V2_VERSION) {
+      stored.heat_rate = v2.heat_rate;
+      stored.cool_rate = v2.cool_rate;
+      stored_seeds.heat_rate = v2.seed_heat;
+      stored_seeds.cool_rate = v2.seed_cool;
+      ESP_LOGI(TAG, "Migrating learned response rates from storage v2");
+    } else if (this->make_entity_preference<StoredTuningV1>(TUNING_V1_PREFERENCE_TYPE).load(&v1) &&
+               v1.version == TUNING_V1_VERSION) {
+      // v1 stored no seeds and always kept learned rates over the
+      // configuration, so treat them as learned from today's seeds.
+      stored.heat_rate = v1.heat_rate;
+      stored.cool_rate = v1.cool_rate;
+      stored_seeds.heat_rate = this->seeds_.heat_rate;
+      stored_seeds.cool_rate = this->seeds_.cool_rate;
+      ESP_LOGI(TAG, "Migrating learned response rates from storage v1");
+    }
   }
+
+  const Resolved loss = workflow::pid::resolve(stored.loss, stored_seeds.loss, this->seeds_.loss, 0.0f,
+                                               RoomModel::MAX_LOSS);
+  const Resolved heat = workflow::pid::resolve(stored.heat_rate, stored_seeds.heat_rate, this->seeds_.heat_rate);
+  const Resolved cool = workflow::pid::resolve(stored.cool_rate, stored_seeds.cool_rate, this->seeds_.cool_rate);
+  const Resolved heat_dead = workflow::pid::resolve(stored.heat_dead_s, stored_seeds.heat_dead_s,
+                                                    this->seeds_.heat_dead_s, RoomModel::MIN_DEAD_S,
+                                                    RoomModel::MAX_DEAD_S);
+  const Resolved cool_dead = workflow::pid::resolve(stored.cool_dead_s, stored_seeds.cool_dead_s,
+                                                    this->seeds_.cool_dead_s, RoomModel::MIN_DEAD_S,
+                                                    RoomModel::MAX_DEAD_S);
+  this->sources_ = ModelSources{loss.source, heat.source, cool.source, heat_dead.source, cool_dead.source};
+  this->pid_step_->startModel(ModelState{loss.value, heat.value, cool.value, heat_dead.value, cool_dead.value},
+                              heat.source == TuningSource::RESTORED, cool.source == TuningSource::RESTORED);
+  this->log_model_("Room model");
+
+  // Record the seeds in use, so the next boot compares against them.
+  this->save_tuning_(millis(), true);
 }
 
-void WorkflowClimate::save_tuning_if_changed_(uint32_t now) {
-  if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive() || this->pid_step_->measurements() == 0) {
+void WorkflowClimate::log_model_(const char *prefix) const {
+  using workflow::pid::tuning_source_to_string;
+  const workflow::pid::ModelState &m = this->pid_step_->modelState();
+  ESP_LOGI(TAG, "%s: heating %.2f C/h (%s), cooling %.2f C/h (%s), heat loss %.3f /h (%s)", prefix,
+           per_hour(m.heat_rate), tuning_source_to_string(this->sources_.heat_rate), per_hour(m.cool_rate),
+           tuning_source_to_string(this->sources_.cool_rate), per_hour(m.loss),
+           tuning_source_to_string(this->sources_.loss));
+  ESP_LOGI(TAG, "%s: dead time heating %.1f min (%s), cooling %.1f min (%s)", prefix, m.heat_dead_s / 60.0f,
+           tuning_source_to_string(this->sources_.heat_dead), m.cool_dead_s / 60.0f,
+           tuning_source_to_string(this->sources_.cool_dead));
+}
+
+static bool same_model(const workflow::pid::ModelState &a, const workflow::pid::ModelState &b) {
+  return a.loss == b.loss && a.heat_rate == b.heat_rate && a.cool_rate == b.cool_rate &&
+         a.heat_dead_s == b.heat_dead_s && a.cool_dead_s == b.cool_dead_s;
+}
+
+void WorkflowClimate::save_tuning_(uint32_t now, bool force) {
+  if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
     return;
   }
-  const float heat = this->pid_step_->responseRate(true);
-  const float cool = this->pid_step_->responseRate(false);
-  if (heat == this->stored_tuning_.heat_rate && cool == this->stored_tuning_.cool_rate) {
+  const StoredTuning current{TUNING_VERSION, this->pid_step_->modelState(), this->seeds_};
+  if (same_model(current.model, this->stored_tuning_.model) && same_model(current.seeds, this->stored_tuning_.seeds)) {
     return;
   }
-  const bool first = !std::isfinite(this->stored_tuning_.heat_rate);
-  if (!first && static_cast<uint32_t>(now - this->last_tuning_save_) < TUNING_SAVE_INTERVAL_MS) {
+  if (!force && static_cast<uint32_t>(now - this->last_tuning_save_) < TUNING_SAVE_INTERVAL_MS) {
     return;
   }
-  this->stored_tuning_ = StoredTuning{TUNING_VERSION, heat, cool};
+  this->stored_tuning_ = current;
   this->tuning_preference_.save(&this->stored_tuning_);
   this->last_tuning_save_ = now;
+}
+
+void WorkflowClimate::on_safe_shutdown() {
+  // Runs before the preferences are synced to flash on an OTA or safe reboot.
+  this->save_tuning_(millis(), true);
+}
+
+void WorkflowClimate::reset_tuning() {
+  if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
+    ESP_LOGW(TAG, "reset_tuning: adaptive PID tuning is not enabled");
+    return;
+  }
+  this->pid_step_->resetTuning(this->seeds_);
+  this->sources_ = ModelSources{};
+  this->save_tuning_(millis(), true);
+  this->log_model_("Tuning reset to the configured seeds");
+  this->publish_diagnostics_();
 }
 
 void WorkflowClimate::warn_if_off_step_(const char *name, float value) {
@@ -213,7 +300,7 @@ void WorkflowClimate::setup() {
 
   this->targets_preference_ = this->make_entity_preference<StoredTargets>(0x57464C57UL);
   this->load_targets_();
-  this->tuning_preference_ = this->make_entity_preference<StoredTuning>(0x57464C54UL);
+  this->tuning_preference_ = this->make_entity_preference<StoredTuning>(TUNING_PREFERENCE_TYPE);
   this->load_tuning_();
   this->restored_state_ = this->restore_state_();
   this->compatible_ = true;
@@ -412,8 +499,12 @@ void WorkflowClimate::run_workflows_() {
     this->hysteresis_step_->run(current, &this->device_);
   }
   if (this->pid_step_ != nullptr) {
+    this->pid_step_->setOutdoorTemperature(this->outdoor_temperature_sensor_ != nullptr &&
+                                                   this->outdoor_temperature_sensor_->has_state()
+                                               ? this->outdoor_temperature_sensor_->state
+                                               : NAN);
     this->pid_step_->run(current, &this->device_);
-    this->save_tuning_if_changed_(millis());
+    this->save_tuning_(millis(), false);
   } else {
     this->device_.sync_target();
   }
@@ -555,8 +646,12 @@ void WorkflowClimate::publish_diagnostics_() {
   if (this->pid_step_ != nullptr) {
     publish_value(this->pid_kp_sensor_, this->pid_step_->kp());
     publish_value(this->pid_ki_sensor_, this->pid_step_->ki());
-    // Degrees per hour, for the mode in use.
-    publish_value(this->response_rate_sensor_, this->pid_step_->responseRate() * 3600.0f);
+    const workflow::pid::ModelState &m = this->pid_step_->modelState();
+    publish_value(this->heating_rate_sensor_, per_hour(m.heat_rate));
+    publish_value(this->cooling_rate_sensor_, per_hour(m.cool_rate));
+    publish_value(this->heat_loss_sensor_, per_hour(m.loss));
+    publish_value(this->dead_time_heating_sensor_, m.heat_dead_s / 60.0f);
+    publish_value(this->dead_time_cooling_sensor_, m.cool_dead_s / 60.0f);
   }
 }
 
@@ -576,6 +671,18 @@ void WorkflowClimate::dump_config() {
       if (this->pid_step_ != nullptr) {
         ESP_LOGCONFIG(TAG, "  PID gains in use: kp: %.3f  ki: %.5f  kd: %.3f", this->pid_step_->kp(),
                       this->pid_step_->ki(), this->pid_step_->kd());
+        using workflow::pid::tuning_source_to_string;
+        const workflow::pid::ModelState &m = this->pid_step_->modelState();
+        ESP_LOGCONFIG(TAG, "  Heating rate: %.2f C/h, started %s (seed %.2f C/h)", per_hour(m.heat_rate),
+                      tuning_source_to_string(this->sources_.heat_rate), per_hour(this->seeds_.heat_rate));
+        ESP_LOGCONFIG(TAG, "  Cooling rate: %.2f C/h, started %s (seed %.2f C/h)", per_hour(m.cool_rate),
+                      tuning_source_to_string(this->sources_.cool_rate), per_hour(this->seeds_.cool_rate));
+        ESP_LOGCONFIG(TAG, "  Heat loss: %.3f /h, started %s (seed %.3f /h), outdoor temperature: %s",
+                      per_hour(m.loss), tuning_source_to_string(this->sources_.loss), per_hour(this->seeds_.loss),
+                      this->outdoor_temperature_sensor_ != nullptr ? "sensor" : "none (loss not learned)");
+        ESP_LOGCONFIG(TAG, "  Dead time: heating %.1f min (%s), cooling %.1f min (%s), seed %.1f min",
+                      m.heat_dead_s / 60.0f, tuning_source_to_string(this->sources_.heat_dead), m.cool_dead_s / 60.0f,
+                      tuning_source_to_string(this->sources_.cool_dead), this->seeds_.heat_dead_s / 60.0f);
       }
     } else {
       ESP_LOGCONFIG(TAG, "  PID tuning: fixed gains");

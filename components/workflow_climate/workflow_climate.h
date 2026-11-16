@@ -12,6 +12,7 @@
 #include "climate_device_adapter.h"
 #include "controller_types.h"
 #include "pid_workflowstep.h"
+#include "tuning_store.h"
 
 namespace esphome {
 namespace workflow_climate {
@@ -29,6 +30,7 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_inner_climate(climate::Climate *inner);
   void set_temperature_sensor(sensor::Sensor *sensor);
   void set_ready_sensor(binary_sensor::BinarySensor *sensor) { this->ready_sensor_ = sensor; }
+  void set_outdoor_temperature_sensor(sensor::Sensor *sensor) { this->outdoor_temperature_sensor_ = sensor; }
 
   void set_internal_power_sensor(binary_sensor::BinarySensor *sensor) { this->internal_power_sensor_ = sensor; }
   void set_device_power_sensor(binary_sensor::BinarySensor *sensor) { this->device_power_sensor_ = sensor; }
@@ -40,7 +42,11 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_pid_set_point_sensor(sensor::Sensor *sensor) { this->pid_set_point_sensor_ = sensor; }
   void set_pid_kp_sensor(sensor::Sensor *sensor) { this->pid_kp_sensor_ = sensor; }
   void set_pid_ki_sensor(sensor::Sensor *sensor) { this->pid_ki_sensor_ = sensor; }
-  void set_response_rate_sensor(sensor::Sensor *sensor) { this->response_rate_sensor_ = sensor; }
+  void set_heating_rate_sensor(sensor::Sensor *sensor) { this->heating_rate_sensor_ = sensor; }
+  void set_cooling_rate_sensor(sensor::Sensor *sensor) { this->cooling_rate_sensor_ = sensor; }
+  void set_heat_loss_sensor(sensor::Sensor *sensor) { this->heat_loss_sensor_ = sensor; }
+  void set_dead_time_heating_sensor(sensor::Sensor *sensor) { this->dead_time_heating_sensor_ = sensor; }
+  void set_dead_time_cooling_sensor(sensor::Sensor *sensor) { this->dead_time_cooling_sensor_ = sensor; }
 
   void set_update_interval(uint32_t value) { this->update_interval_ = value; }
   void set_settle_time(uint32_t value) { this->settle_ms_ = value; }
@@ -58,6 +64,10 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_pid_full_output_gap(float value) { this->tuning_.full_output_gap = value; }
   void set_pid_kp_min(float value) { this->tuning_.kp_min = value; }
   void set_pid_kp_max(float value) { this->tuning_.kp_max = value; }
+  // Starting values for the room model: rates in degrees per hour, heat loss per hour.
+  void set_initial_heat_rate(float per_hour) { this->initial_heat_rate_ = per_hour / 3600.0f; }
+  void set_initial_cool_rate(float per_hour) { this->initial_cool_rate_ = per_hour / 3600.0f; }
+  void set_initial_heat_loss(float per_hour) { this->initial_heat_loss_ = per_hour / 3600.0f; }
 
   void set_hysteresis_enabled(bool value) { this->hysteresis_enabled_ = value; }
   void set_hysteresis_on(float value) { this->hysteresis_on_ = value; }
@@ -70,6 +80,11 @@ class WorkflowClimate : public Component, public climate::Climate {
   void setup() override;
   void loop() override;
   void dump_config() override;
+  // Saves what was learned since the last save, e.g. before an OTA reboot.
+  void on_safe_shutdown() override;
+
+  // Forget the learned room model and start from the configured seeds.
+  void reset_tuning();
 
  protected:
   static constexpr uint32_t TARGETS_VERSION = 1;
@@ -79,9 +94,29 @@ class WorkflowClimate : public Component, public climate::Climate {
     float cool;
   };
 
-  // Learned response rates, degrees per second. Saved so tuning survives a reboot.
-  static constexpr uint32_t TUNING_VERSION = 1;
+  // The learned room model (room_model.h), with the configured seeds it was
+  // learned from (tuning_store.h). Saved so tuning survives a reboot.
+  static constexpr uint32_t TUNING_VERSION = 3;
+  static constexpr uint32_t TUNING_PREFERENCE_TYPE = 0x57464C33UL;
   struct StoredTuning {
+    uint32_t version;
+    workflow::pid::ModelState model;
+    workflow::pid::ModelState seeds;
+  };
+  // Earlier storage, read once to migrate. v2: response rates with their seeds.
+  static constexpr uint32_t TUNING_V2_VERSION = 2;
+  static constexpr uint32_t TUNING_V2_PREFERENCE_TYPE = 0x57464C32UL;
+  struct StoredTuningV2 {
+    uint32_t version;
+    float heat_rate;
+    float cool_rate;
+    float seed_heat;
+    float seed_cool;
+  };
+  // v1: response rates only.
+  static constexpr uint32_t TUNING_V1_VERSION = 1;
+  static constexpr uint32_t TUNING_V1_PREFERENCE_TYPE = 0x57464C54UL;
+  struct StoredTuningV1 {
     uint32_t version;
     float heat_rate;
     float cool_rate;
@@ -103,7 +138,10 @@ class WorkflowClimate : public Component, public climate::Climate {
   void publish_diagnostics_();
   void warn_if_off_step_(const char *name, float value);
   void load_tuning_();
-  void save_tuning_if_changed_(uint32_t now);
+  // Save the learned rates if they changed: at once with `force`, else at most
+  // once per TUNING_SAVE_INTERVAL_MS.
+  void save_tuning_(uint32_t now, bool force);
+  void log_model_(const char *prefix) const;
 
   bool is_workflow_mode_(climate::ClimateMode mode) const {
     return mode == climate::CLIMATE_MODE_HEAT || mode == climate::CLIMATE_MODE_COOL;
@@ -123,6 +161,7 @@ class WorkflowClimate : public Component, public climate::Climate {
   climate::Climate *inner_{nullptr};
   sensor::Sensor *temperature_sensor_{nullptr};
   binary_sensor::BinarySensor *ready_sensor_{nullptr};
+  sensor::Sensor *outdoor_temperature_sensor_{nullptr};
 
   binary_sensor::BinarySensor *internal_power_sensor_{nullptr};
   binary_sensor::BinarySensor *device_power_sensor_{nullptr};
@@ -132,7 +171,11 @@ class WorkflowClimate : public Component, public climate::Climate {
   sensor::Sensor *pid_set_point_sensor_{nullptr};
   sensor::Sensor *pid_kp_sensor_{nullptr};
   sensor::Sensor *pid_ki_sensor_{nullptr};
-  sensor::Sensor *response_rate_sensor_{nullptr};
+  sensor::Sensor *heating_rate_sensor_{nullptr};
+  sensor::Sensor *cooling_rate_sensor_{nullptr};
+  sensor::Sensor *heat_loss_sensor_{nullptr};
+  sensor::Sensor *dead_time_heating_sensor_{nullptr};
+  sensor::Sensor *dead_time_cooling_sensor_{nullptr};
 
   climate::ClimateTraits traits_;
   ClimateDeviceAdapter device_;
@@ -142,6 +185,15 @@ class WorkflowClimate : public Component, public climate::Climate {
   ESPPreferenceObject tuning_preference_;
   StoredTuning stored_tuning_{};
   uint32_t last_tuning_save_{0};
+  float initial_heat_rate_{NAN};
+  float initial_cool_rate_{NAN};
+  float initial_heat_loss_{NAN};
+  // The configured seeds of the room model, and where each value started from.
+  workflow::pid::ModelState seeds_{};
+  struct ModelSources {
+    workflow::pid::TuningSource loss, heat_rate, cool_rate, heat_dead, cool_dead;
+  };
+  ModelSources sources_{};
 
   optional<climate::ClimateDeviceRestoreState> restored_state_;
   ESPPreferenceObject targets_preference_;

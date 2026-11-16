@@ -1,12 +1,14 @@
 #ifndef PID_WORKFLOWSTEP_H
 #define PID_WORKFLOWSTEP_H
 
+#include <cmath>
 #include <cstdint>
 
 #include "controller_types.h"
 
 #include "adaptive_pid.h"
-#include "response_rate_estimator.h"
+#include "room_model.h"
+#include "tuning_rule.h"
 
 namespace workflow {
 
@@ -15,14 +17,18 @@ namespace workflow {
         class PidWorkflowStep : public devicestate::WorkflowStep {
         private:
             AdaptivePID *adaptivePID;
-            ResponseRateEstimator estimator;
+            RoomModel model;
+            float outdoorTemperature{NAN};
             TuningConfig tuning;
 
             float minTemp;
             float maxTemp;
             float maxAdjustmentOver;
             float maxAdjustmentUnder;
-            float initialKi;
+            float configuredKi;
+            // Per mode (0 = cooling, 1 = heating): keep the configured ki until
+            // that mode's first measurement.
+            bool useConfiguredKi[2]{false, false};
             bool heating{true};
 
             bool ensurePIDTarget(devicestate::IDeviceStateManager* deviceManager);
@@ -48,13 +54,17 @@ namespace workflow {
             float ki() const { return this->adaptivePID->ki(); }
             float kd() const { return this->adaptivePID->kd(); }
 
-            // Learned response rate, degrees per second, for heating or cooling.
             bool isAdaptive() const { return this->tuning.adaptive; }
-            float responseRate(bool heating) const { return this->estimator.rate(heating); }
-            float responseRate() const { return this->estimator.rate(this->heating); }
-            uint32_t measurements() const { return this->estimator.measurements(); }
-            // Restore a previously learned rate (e.g. from flash).
-            void restoreResponseRate(bool heating, float rate);
+            // The learned room model (room_model.h).
+            const ModelState &modelState() const { return this->model.state(); }
+            // Outdoor temperature for the model's heat loss; NaN when unknown.
+            void setOutdoorTemperature(float value) { this->outdoorTemperature = value; }
+            // Start from a model state. A restored rate was learned before the
+            // last reboot; a seeded one keeps the configured ki until that
+            // mode's first measurement.
+            void startModel(const ModelState &state, bool restoredHeat, bool restoredCool);
+            // Forget everything learned and start from these seeds.
+            void resetTuning(const ModelState &seeds);
         };
 
     }

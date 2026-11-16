@@ -68,6 +68,7 @@ climate:
 | `update_interval` | `2s` | How often the workflows run. |
 | `settle_time` | `2 × update_interval + 5s` | How long after a power command the inner climate's reported power is ignored. |
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
+| `outdoor_temperature_sensor` | none | Outdoor temperature for the room model's heat loss. Without it heat loss is not learned and is left out of the heating and cooling rates. |
 | `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). |
 | `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. |
 
@@ -78,10 +79,13 @@ climate's and can only be narrowed.
 Diagnostic entities are created automatically: `Internal power on` (what the
 workflow last commanded), `Device power on`, `Operating`, `Current temperature`
 (the device's own reading), `Set Point` (the device's setpoint) and
-`PID Set Point`, plus `PID Kp`, `PID Ki` and `Response rate` when the PID is
-used. Each can be renamed or reconfigured under its key
-(`internal_power`, `device_power`, `operating`, `device_current_temperature`,
-`device_set_point`, `pid_set_point`, `pid_kp`, `pid_ki`, `response_rate`). Anything device-specific, such as
+`PID Set Point`, plus `PID Kp` and `PID Ki` when the PID is used, and with
+adaptive tuning the learned room model: `Heating rate`, `Cooling rate`,
+`Heat loss`, `Dead time heating` and `Dead time cooling`. Each can be renamed
+or reconfigured under its key (`internal_power`, `device_power`, `operating`,
+`device_current_temperature`, `device_set_point`, `pid_set_point`, `pid_kp`,
+`pid_ki`, `heating_rate`, `cooling_rate`, `heat_loss`, `dead_time_heating`,
+`dead_time_cooling`). Anything device-specific, such as
 compressor frequency or energy, comes from the inner climate's own sensors.
 
 ### PID gains
@@ -121,36 +125,101 @@ reset on a target change and while the device is switched off.
 ### Continuous tuning
 
 With `adaptive: true` (the default) `kp` and `ki` are retuned while the
-controller runs, and the configured values are only the starting point.
+controller runs, and the configured values are only the starting point. The
+controller learns a model of the room (`room_model.h`):
 
-The controller measures how fast the room warms (or cools) while the device is
-actively operating, as temperature change per hour of operating time. One
-measurement is taken per 30 minutes of operation, however short the individual
-runs, and each moves the estimate 20% of the way. The gains then follow the
-SIMC tuning rule for an integrating process:
+```
+heating:  dT/dt =  heating_rate * u  -  heat_loss * (T_room - T_outdoor)
+cooling:  dT/dt = -cooling_rate * u  -  heat_loss * (T_room - T_outdoor)
+```
+
+- `heat_loss`: how fast the room drifts towards the outdoor temperature.
+- `heating_rate` / `cooling_rate`: how fast the device moves the room at full
+  output.
+- `u`: the device's output, 0 to 1. Units that report no output (no
+  compressor frequency) get it estimated from the setpoint they were given:
+  full output once the setpoint is `full_output_gap` past the room
+  temperature, proportionally less below that.
+
+It is learned in 15 minute windows, so a sensor's 0.1°C steps average out.
+Idle windows (device not operating, room at least 3°C from outdoors) measure
+the heat loss. Operating windows at a mean output of at least 0.3 measure the
+change, take out the drift the heat loss predicts, and divide by the output:
+one sample of the heating or cooling rate. Each sample moves the estimate 20%
+of the way (heat loss 10%). A room held steady at low output therefore does not
+read as a slow room.
+
+After every start or stop the room keeps reacting to the previous state for a
+while: the dead time, learned per mode from when the room turns after a start
+(where it stops falling after a heating start, or rising after a cooling one).
+No window is taken inside it. A defrost cycle, reported by the device as
+`DEFROSTING`, delivers no heat: no window is taken during one, and the model
+waits a dead time after it. A window in which the room moves the wrong way
+faster than with the device off (an open window, say) is dropped.
+
+The gains follow the SIMC tuning rule for an integrating process, per mode:
 
 ```
 kp = full_output_gap / (rate * tc)      ki = kp / (4 * tc)      tc = response_time + dead_time
 ```
 
-A room that responds quickly gets a lower gain, a slow one a higher gain.
-Heating and cooling are learned separately, the learned rates are saved across
-reboots, and `kd` is never changed.
+A room that responds quickly gets a lower gain, a slow one a higher gain, and a
+longer dead time a gentler loop. `kd` is never changed. A configured `ki` is
+used for a mode until that mode's first measurement; with `ki: 0` the tuned
+`ki` is used from the start.
 
 | `pid` option | Default | Meaning |
 |---|---|---|
 | `adaptive` | `true` | Retune `kp` and `ki` continuously. `false` keeps the configured gains. |
+| `initial_heat_rate` / `initial_cool_rate` | from `kp` | Starting heating / cooling rate at full output, °C/h (0.2 to 10). Without them both start from the rate `kp` implies, else 2 °C/h. |
+| `initial_heat_loss` | `0.1` | Starting heat loss, per hour (0 to 2). 0.1 is a drift of 1°C/h at 10°C indoor-outdoor difference. |
 | `response_time` | `10min` | How quickly the loop should correct an error. Longer is gentler. |
-| `dead_time` | `5min` | Delay before the room temperature reacts to a setpoint change. |
+| `dead_time` | `5min` | Starting dead time for both modes (learned between 1 and 30 minutes). |
 | `full_output_gap` | `0.75` | How far the device setpoint must be past the room temperature for the device to run at full output. |
 | `kp_min` / `kp_max` | `0.25` / `4.0` | Bounds on the tuned `kp`. |
 
-The gains in use are published as `PID Kp` and `PID Ki`, and the learned rate
-as `Response rate` (°C/h). To make learned values the new starting point, copy
-`PID Kp` and `PID Ki` into `kp` and `ki`.
+The gains in use are published as `PID Kp` and `PID Ki`, and the model as
+`Heating rate`, `Cooling rate` (°C/h), `Heat loss` (1/h), `Dead time heating`
+and `Dead time cooling` (min).
 
-`tools/room_model/replay.cpp` runs recorded operation through the same
-estimator, to choose starting values or to check a change against real data.
+#### Learned values across reboots and flashes
+
+The model is saved to flash at most once an hour while it changes, and always
+on a safe reboot, which includes every OTA update. Each value is stored with
+the starting value (seed) it was learned from, and at boot each starts from:
+
+- **what was learned**, when its seed is unchanged. Flashing new firmware with
+  the same configuration keeps what the unit has learned.
+- **the configured seed**, when the seed changed (`initial_heat_rate`,
+  `initial_cool_rate`, `kp` without them, `initial_heat_loss`, `dead_time`) or
+  nothing is stored. Editing a seed is taken as deliberate and applies on the
+  next flash.
+
+The boot log and `dump_config` say which applied to each value (`restored` or
+`configured`). To make learned values the new starting point, copy them into
+the matching options; the unit carries on from them. Response rates learned by
+earlier versions (storage v1 and v2) are kept on upgrade as the heating and
+cooling rates.
+
+`reset_tuning()` forgets what was learned and starts from the seeds. Expose it
+as an API action to call it from Home Assistant
+(`esphome.<device>_reset_tuning`):
+
+```yaml
+api:
+  actions:
+    - action: reset_tuning
+      then:
+        - lambda: id(hvac_workflow).reset_tuning();
+```
+
+#### Replaying recorded history
+
+`tools/room_model/replay.cpp` runs a Home Assistant history export through the
+same model, to see what a unit would learn from it and to check the output
+estimate: rates learned from full-output and from partial-output windows should
+agree. Usage is at the top of the file. The export holds states only, so
+defrost is not visible there and is caught only as wrong-way windows.
 
 ## Behaviour
 
@@ -197,9 +266,17 @@ c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_adaptive
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_round_to_step \
   tests/test_round_to_step.cpp && /tmp/test_round_to_step
 
-# Response-rate estimator and tuning rule, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_response_rate_estimator \
-  tests/test_response_rate_estimator.cpp && /tmp/test_response_rate_estimator
+# Tuning rule, no ESPHome needed
+c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_rule \
+  tests/test_tuning_rule.cpp && /tmp/test_tuning_rule
+
+# Room model against a simulated room, no ESPHome needed
+c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_room_model \
+  tests/test_room_model.cpp && /tmp/test_room_model
+
+# Learned-versus-configured choice at boot, no ESPHome needed
+c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_store \
+  tests/test_tuning_store.cpp && /tmp/test_tuning_store
 
 # Host build against the demo climate
 esphome compile test.yaml
@@ -218,5 +295,7 @@ Layout of `components/workflow_climate/`:
 - `climate_device_adapter.*`: presents the inner climate to the controller.
 - `power_tracker.h`: commanded versus reported power; no ESPHome dependency.
 - `hysterisis_workflowstep.*`, `pid_workflowstep.*`, `adaptive_pid.*`: the controller.
-- `response_rate_estimator.h`: online room response estimate and the tuning rule; no ESPHome dependency.
+- `room_model.h`: the learned room model and the output estimate; no ESPHome dependency.
+- `tuning_rule.h`: the gains that follow from the model; no ESPHome dependency.
+- `tuning_store.h`: whether each learned value starts from what was learned or its seed at boot; no ESPHome dependency.
 - `controller_types.h`: the interface between the controller and the device.
