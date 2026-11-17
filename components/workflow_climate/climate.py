@@ -42,6 +42,8 @@ CONF_INITIAL_HEAT_LOSS = "initial_heat_loss"
 CONF_HYSTERESIS = "hysteresis"
 CONF_ON_THRESHOLD = "on_threshold"
 CONF_OFF_THRESHOLD = "off_threshold"
+CONF_OFF_DELAY = "off_delay"
+CONF_OFF_LIMIT = "off_limit"
 CONF_MIN_CYCLE_DURATION = "min_cycle_duration"
 
 CONF_INTERNAL_POWER = "internal_power"
@@ -114,11 +116,31 @@ HYSTERESIS_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_ON_THRESHOLD, default=0.25): cv.positive_float,
         cv.Optional(CONF_OFF_THRESHOLD, default=0.25): cv.positive_float,
+        # Past off_threshold the device is first held at least output (the PID
+        # pulled down); it is switched off once the room has stayed past the
+        # threshold this long, or at once past off_limit.
+        cv.Optional(
+            CONF_OFF_DELAY, default="0s"
+        ): cv.positive_time_period_milliseconds,
+        # Default: off_threshold + 0.5.
+        cv.Optional(CONF_OFF_LIMIT): cv.positive_float,
         cv.Optional(
             CONF_MIN_CYCLE_DURATION, default="60s"
         ): cv.positive_time_period_milliseconds,
     }
 )
+
+
+def _validate_off_limit(conf):
+    if CONF_OFF_LIMIT in conf and conf[CONF_OFF_LIMIT] <= conf[CONF_OFF_THRESHOLD]:
+        raise cv.Invalid(
+            f"{CONF_OFF_LIMIT} must be greater than {CONF_OFF_THRESHOLD}",
+            path=[CONF_OFF_LIMIT],
+        )
+    return conf
+
+
+HYSTERESIS_SCHEMA = cv.All(HYSTERESIS_SCHEMA, _validate_off_limit)
 
 
 def _temperature_sensor_schema():
@@ -257,6 +279,12 @@ async def to_code(config):
         cg.add(var.set_hysteresis_enabled(True))
         cg.add(var.set_hysteresis_on(conf[CONF_ON_THRESHOLD]))
         cg.add(var.set_hysteresis_off(conf[CONF_OFF_THRESHOLD]))
+        cg.add(var.set_hysteresis_off_delay(conf[CONF_OFF_DELAY]))
+        cg.add(
+            var.set_hysteresis_off_limit(
+                conf.get(CONF_OFF_LIMIT, conf[CONF_OFF_THRESHOLD] + 0.5)
+            )
+        )
         cg.add(var.set_min_cycle_duration(conf[CONF_MIN_CYCLE_DURATION]))
 
     for key, setter in (

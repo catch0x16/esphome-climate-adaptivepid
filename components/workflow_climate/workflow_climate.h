@@ -11,6 +11,7 @@
 
 #include "climate_device_adapter.h"
 #include "controller_types.h"
+#include "hysterisis_workflowstep.h"
 #include "pid_workflowstep.h"
 #include "tuning_store.h"
 
@@ -72,6 +73,8 @@ class WorkflowClimate : public Component, public climate::Climate {
   void set_hysteresis_enabled(bool value) { this->hysteresis_enabled_ = value; }
   void set_hysteresis_on(float value) { this->hysteresis_on_ = value; }
   void set_hysteresis_off(float value) { this->hysteresis_off_ = value; }
+  void set_hysteresis_off_limit(float value) { this->hysteresis_off_limit_ = value; }
+  void set_hysteresis_off_delay(uint32_t ms) { this->hysteresis_off_delay_ms_ = ms; }
   void set_min_cycle_duration(uint32_t value) { this->min_cycle_ms_ = value; }
 
   // After the inner climate. An inner climate that sets up even later is
@@ -179,7 +182,7 @@ class WorkflowClimate : public Component, public climate::Climate {
 
   climate::ClimateTraits traits_;
   ClimateDeviceAdapter device_;
-  devicestate::WorkflowStep *hysteresis_step_{nullptr};
+  workflow::hysterisis::HysterisisWorkflowStep *hysteresis_step_{nullptr};
   workflow::pid::PidWorkflowStep *pid_step_{nullptr};
   workflow::pid::TuningConfig tuning_{};
   ESPPreferenceObject tuning_preference_;
@@ -214,6 +217,8 @@ class WorkflowClimate : public Component, public climate::Climate {
   float setpoint_deadband_{0.0f};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
+  float hysteresis_off_limit_{NAN};
+  uint32_t hysteresis_off_delay_ms_{0};
 
   uint32_t update_interval_{2000};
   uint32_t settle_ms_{9000};

@@ -280,7 +280,8 @@ void WorkflowClimate::setup() {
 
   if (this->hysteresis_enabled_) {
     this->hysteresis_step_ = new (std::nothrow)
-        workflow::hysterisis::HysterisisWorkflowStep(this->hysteresis_on_, this->hysteresis_off_);
+        workflow::hysterisis::HysterisisWorkflowStep(this->hysteresis_on_, this->hysteresis_off_,
+                                                     this->hysteresis_off_limit_, this->hysteresis_off_delay_ms_);
     if (this->hysteresis_step_ == nullptr) {
       ESP_LOGE(TAG, "Failed to allocate the hysteresis step");
       this->mark_failed();
@@ -499,6 +500,7 @@ void WorkflowClimate::run_workflows_() {
     this->hysteresis_step_->run(current, &this->device_);
   }
   if (this->pid_step_ != nullptr) {
+    this->pid_step_->setHoldLeast(this->hysteresis_step_ != nullptr && this->hysteresis_step_->isHolding());
     this->pid_step_->setOutdoorTemperature(this->outdoor_temperature_sensor_ != nullptr &&
                                                    this->outdoor_temperature_sensor_->has_state()
                                                ? this->outdoor_temperature_sensor_->state
@@ -695,6 +697,10 @@ void WorkflowClimate::dump_config() {
   if (this->hysteresis_enabled_) {
     ESP_LOGCONFIG(TAG, "  Hysteresis: on=%.2f off=%.2f, minimum cycle %u ms", this->hysteresis_on_,
                   this->hysteresis_off_, static_cast<unsigned>(this->min_cycle_ms_));
+    if (this->hysteresis_off_delay_ms_ > 0) {
+      ESP_LOGCONFIG(TAG, "  Hysteresis off delay: %u s, limit %.2f", static_cast<unsigned>(this->hysteresis_off_delay_ms_ / 1000),
+                    this->hysteresis_off_limit_);
+    }
   } else {
     ESP_LOGCONFIG(TAG, "  Hysteresis: disabled");
   }

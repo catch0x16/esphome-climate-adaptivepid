@@ -67,4 +67,6 @@ climate:
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5
+      off_delay: 5min
+      off_limit: 1.0
       min_cycle_duration: 60s

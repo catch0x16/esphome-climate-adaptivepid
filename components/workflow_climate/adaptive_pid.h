@@ -28,6 +28,12 @@ public:
     // Returns: adjusted setpoint (the target itself while the device is off)
     float update(float current_temp, uint32_t current_time_ms, bool system_power_on);
 
+    // Hold the output at its least: the lower limit while heating, the upper
+    // while cooling. The integral is frozen and the derivative state follows
+    // the room, so update() resumes from here without a jump.
+    // Returns: the held setpoint.
+    float hold(float current_temp, uint32_t current_time_ms);
+
     // Configure target and direction. Resets the integral and the derivative state.
     void set_target(float target, bool heating);
     float get_target() const;

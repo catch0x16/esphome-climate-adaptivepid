@@ -124,6 +124,13 @@ float AdaptivePID::update(float current_temp, uint32_t current_time_ms, bool sys
     return _target + offset;
 }
 
+float AdaptivePID::hold(float current_temp, uint32_t current_time_ms) {
+    _prev_error = _target - current_temp;
+    _last_update_ms = current_time_ms;
+    _has_state = true;
+    return _target + (_heating ? _output_min_offset : _output_max_offset);
+}
+
 // -----------------------------
 // Helpers
 // -----------------------------

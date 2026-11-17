@@ -19,6 +19,7 @@ namespace workflow {
             AdaptivePID *adaptivePID;
             RoomModel model;
             float outdoorTemperature{NAN};
+            bool holdLeast{false};
             TuningConfig tuning;
 
             float minTemp;
@@ -59,6 +60,9 @@ namespace workflow {
             const ModelState &modelState() const { return this->model.state(); }
             // Outdoor temperature for the model's heat loss; NaN when unknown.
             void setOutdoorTemperature(float value) { this->outdoorTemperature = value; }
+            // Hold the device at the least output allowed (hysteresis is waiting
+            // to switch it off); the integral is frozen meanwhile.
+            void setHoldLeast(bool value) { this->holdLeast = value; }
             // Start from a model state. A restored rate was learned before the
             // last reboot; a seeded one keeps the configured ki until that
             // mode's first measurement.

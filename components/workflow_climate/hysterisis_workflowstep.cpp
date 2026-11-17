@@ -1,5 +1,6 @@
 #include "hysterisis_workflowstep.h"
 
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 using namespace esphome;
 
@@ -13,8 +14,10 @@ namespace workflow {
 
         HysterisisWorkflowStep::HysterisisWorkflowStep(
             const float hysterisisOn,
-            const float hysterisisOff
-        ) {
+            const float hysterisisOff,
+            const float offLimit,
+            const uint32_t offDelayMs
+        ) : offGate(hysterisisOff, offLimit, offDelayMs) {
             this->hysterisisOn = hysterisisOn;
             this->hysterisisOff = hysterisisOff;
         }
@@ -27,11 +30,24 @@ namespace workflow {
             }
             if (result->active) {
                 ESP_LOGV(TAG, "Active while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
-                if (result->delta > this->hysterisisOff) {
-                    ESP_LOGI(TAG, "Turn off while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
-                    deviceManager->internalTurnOff();
+                const uint32_t now = millis();
+                const bool wasHolding = this->holding;
+                const OffAction action = this->offGate.update(result->delta, now);
+                this->holding = action != OffAction::NONE;
+                if (action == OffAction::HOLD && !wasHolding) {
+                    ESP_LOGI(TAG, "Holding at least output while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
+                } else if (action == OffAction::NONE && wasHolding) {
+                    ESP_LOGI(TAG, "Hold released while %s: delta={%f}", result->label.c_str(), result->delta);
+                } else if (action == OffAction::TURN_OFF) {
+                    ESP_LOGI(TAG, "Turn off while %s after %.0f s past the threshold: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), this->offGate.held_ms(now) / 1000.0f, result->delta, result->currentTemperature, result->targetTemperature);
+                    if (deviceManager->internalTurnOff()) {
+                        this->offGate.reset();
+                        this->holding = false;
+                    }
                 }
             } else {
+                this->offGate.reset();
+                this->holding = false;
                 ESP_LOGI(TAG, "Not currently active while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
                 if (-result->delta > this->hysterisisOn) {
                     ESP_LOGI(TAG, "Turn on while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
@@ -90,6 +106,9 @@ namespace workflow {
             HysterisisResult result = this->getHysterisisResult(currentTemperature, deviceManager);
             if (result.shouldRun) {
                 this->executeHysterisisWorkflowStep(&result, deviceManager);
+            } else {
+                this->offGate.reset();
+                this->holding = false;
             }
         }
 

@@ -99,4 +99,7 @@ climate:
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5
+      # Room 22 against target 21 is past the threshold but not past the
+      # default limit (1.0): held at least output for 3 s, then switched off.
+      off_delay: 3s
       min_cycle_duration: 4s

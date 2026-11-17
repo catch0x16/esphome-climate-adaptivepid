@@ -103,6 +103,25 @@ int main() {
     check(near(pid.kp(), 2.0f) && near(pid.ki(), 0.002f, 0.00001f), "set_gains: gains are replaced");
   }
 
+  {
+    // Hold: least output, integral frozen, no jump on resume.
+    AdaptivePID pid = make(1.0f, 0.001f, 0.0f);
+    pid.set_output_limits(-3.0f, 0.5f);
+    for (uint32_t t = 1000; t <= 301000; t += 2000) pid.update(20.8f, t, true);
+    const float integral = pid.integral();
+    check(near(pid.hold(21.9f, 303000), 18.0f), "hold: heating holds at target minus the under limit");
+    for (uint32_t t = 305000; t <= 605000; t += 2000) pid.hold(21.9f, t);
+    check(near(pid.integral(), integral), "hold: integral frozen while held");
+    const float resumed = pid.update(21.6f, 607000, true);
+    const float expected = 21.0f + 1.0f * (21.0f - 21.6f) + 0.001f * (integral + (21.0f - 21.6f) * 2.0f);
+    check(near(resumed, expected), "hold: resumes with the frozen integral and only the elapsed step");
+
+    AdaptivePID cool = make(1.0f, 0.0f, 0.0f);
+    cool.set_target(24.0f, false);
+    cool.set_output_limits(-0.5f, 3.0f);
+    check(near(cool.hold(23.0f, 1000), 27.0f), "hold: cooling holds at target plus the under limit");
+  }
+
   if (failures != 0) {
     std::printf("%d failure(s)\n", failures);
     return EXIT_FAILURE;

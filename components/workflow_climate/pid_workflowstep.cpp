@@ -144,11 +144,13 @@ namespace workflow {
                 // The PID knows the range it may use, so its integral stops
                 // accumulating once the setpoint is pinned at either end.
                 this->adaptivePID->set_output_limits(adjustedMinTemp - target, adjustedMaxTemp - target);
-                const float setPointCorrectionSimple =
-                    this->adaptivePID->update(currentTemperature, now, deviceManager->isInternalPowerOn());
+                const bool holding = this->holdLeast && deviceManager->isInternalPowerOn();
+                const float setPointCorrectionSimple = holding
+                    ? this->adaptivePID->hold(currentTemperature, now)
+                    : this->adaptivePID->update(currentTemperature, now, deviceManager->isInternalPowerOn());
                 const float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);
-                ESP_LOGI(TAG, "PidWorkflowStep [Simple] setPointCorrection={%.2f} adjustedSetPoint={%.2f} kp={%.3f} ki={%.4f} kd={%.3f}",
-                    setPointCorrectionSimple, adjustedSetPointCorrectionSimple,
+                ESP_LOGI(TAG, "PidWorkflowStep [Simple] setPointCorrection={%.2f} adjustedSetPoint={%.2f}%s kp={%.3f} ki={%.4f} kd={%.3f}",
+                    setPointCorrectionSimple, adjustedSetPointCorrectionSimple, holding ? " (held at least output)" : "",
                     this->adaptivePID->kp(), this->adaptivePID->ki(), this->adaptivePID->kd());
 
                 if (deviceManager->internalSetCorrectedTemperature(

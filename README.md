@@ -58,6 +58,8 @@ climate:
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5
+      off_delay: 5min    # optional
+      off_limit: 1.0     # optional
       min_cycle_duration: 60s
 ```
 
@@ -70,7 +72,7 @@ climate:
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
 | `outdoor_temperature_sensor` | none | Outdoor temperature for the room model's heat loss. Without it heat loss is not learned and is left out of the heating and cooling rates. |
 | `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). |
-| `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. |
+| `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. With `off_delay` (default `0s`) a room past `off_threshold` is first held: the PID is pulled to its least output (target minus `max_adjustment_under` while heating) with its integral frozen, and the device is switched off only if the room is still past the threshold after `off_delay`, or at once past `off_limit` (default `off_threshold` + 0.5). Room sensors near the unit read past the target for a few minutes after each run; the delay keeps those brief peaks from forcing a full power-on start. |
 
 At least one of `pid` and `hysteresis` is required. The standard climate
 options (`name`, `visual`, ...) apply; the visual range defaults to the inner
@@ -261,6 +263,10 @@ c++ -std=c++17 -Wall -Wextra -o /tmp/test_power_tracker tests/test_power_tracker
 # PID controller, no ESPHome needed
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_adaptive_pid \
   tests/test_adaptive_pid.cpp components/workflow_climate/adaptive_pid.cpp && /tmp/test_adaptive_pid
+
+# Hysteresis off delay and limit, no ESPHome needed
+c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_off_gate \
+  tests/test_off_gate.cpp && /tmp/test_off_gate
 
 # Setpoint rounding to the device step, no ESPHome needed
 c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_round_to_step \
