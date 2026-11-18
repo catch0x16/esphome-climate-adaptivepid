@@ -1,14 +1,16 @@
 # HVAC supervisor design
 
-**Status: proposed, not scheduled. Nothing here is implemented.**
+**Status:**
+- **Release 1, coordination: implemented.** It is the `climate_adaptivepid_supervisor` Home Assistant integration, with no app. See [Release 1: coordination](#release-1-coordination-implemented).
+- **Everything after that: proposed, not scheduled.** That covers drift and recovery, the house model, proposals, and the emergency mode switch.
 
-A design for a Home Assistant app and custom integration that coordinate the
-`climate_adaptivepid` heads of one house: letting rooms drift to a low-power state
-when they are not in use, recovering them in time, switching mode in an
-emergency, and proposing changes to the schedules from observed use.
+The supervisor coordinates the `climate_adaptivepid` heads of one house that share an outdoor unit. The first need was coordination: telling a head when heat is leaking in from the others, and when to park. That needs no model, so it lives in a custom integration that reacts to state changes. The later goals are letting rooms drift to a low-power state when not in use, recovering them in time, switching mode in an emergency, and proposing schedule changes from observed use. They extend the integration first; an app (below) is only worth adding if modelling outgrows it.
+
+The measurements behind the coordination are in [research/shared-outdoor-unit.md](research/shared-outdoor-unit.md), and the head-side behaviour is in [start-control-design.md](start-control-design.md).
 
 ## Contents
 
+- [Release 1: coordination (implemented)](#release-1-coordination-implemented)
 - [Context](#context)
 - [Goals](#goals)
 - [Who owns what](#who-owns-what)
@@ -24,14 +26,69 @@ emergency, and proposing changes to the schedules from observed use.
 - [Rollout](#rollout)
 - [Verification](#verification)
 
+## Release 1: coordination (implemented)
+
+**What it is.** A custom integration, `custom_components/climate_adaptivepid_supervisor/` in this repo, installed through HACS (Custom repositories → this repo, type Integration). It is event-driven, async Python on Home Assistant's event loop, with no app, websocket, token, Docker image or heavy dependencies.
+
+**Config flow.**
+- **Pick the heads on one outdoor unit:** their adaptive PID climates, at least two.
+- **Pick the rooms that receive hints:** they need `start_control` and the two ESPHome actions below.
+- **Set the park margin.**
+
+For each head, the integration finds its `Operating` binary sensor and its ESPHome node name (from the head's ESPHome config entry) through the device registry.
+
+**Decisions** (`logic.py`, pure Python, tested without Home Assistant). For each hinted room:
+
+| Other heads | Room vs target | Hints sent |
+|---|---|---|
+| None operating | — | `shared_heat` off; no park request (an earlier one expires) |
+| Any operating | within `park_margin` of target, or past it | `shared_heat` on, `request_park` park |
+| Any operating | further below target than that | `shared_heat` on, `request_park` unpark (take the leak instead of starting a run) |
+
+A room's own run never counts as shared heat for that room. Rooms in modes other than heat or cool get no hints.
+
+**Sending** (`coordinator.py`):
+- **When:** on any change of the heads' climate or `Operating` states, and renewed every 60 s.
+- **Expiry:** hints are valid for 120 s (`shared_heat`) and 180 s (`request_park`), so a stopped supervisor leaves the heads alone within 3 minutes.
+- **Calls:** `esphome.<node>_shared_heat` and `esphome.<node>_request_park`.
+- **Failures:** a failed call (head offline) is logged and skipped; the other heads are unaffected.
+- **Logbook:** every change of hints is written to the logbook against the room's climate.
+
+**Head side.** The device YAML defines the two actions, calling the climate's `set_shared_heat_hint(active, valid_for_s)` and `request_park(park, valid_for_s)`. Without hints, each head's local detector and thresholds decide (see [start-control-design.md](start-control-design.md#independence)).
+
+**Entities:**
+- `switch.<name>_supervisor_enabled` (restored across restarts): while off, nothing is sent.
+- `binary_sensor.<name>_outdoor_unit_running`: diagnostic, any head operating.
+- Per hinted room:
+  - `binary_sensor.<name>_<room>_shared_heat`: other heads only.
+  - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat`, `park`, `unpark` or `disabled`, with the reason as an attribute.
+
+**Tests** (`tests/supervisor/`, run with `pytest-homeassistant-custom-component` in an isolated environment, see the README):
+- **The decision rules.**
+- **The hint lifecycle:** sent when another head starts, renewed, cleared when it stops, never for the room's own run.
+- **Park within the margin and unpark below it.**
+- **The disable switch.**
+- **A head offline.**
+- **The config flow.**
+
+**Next steps for the integration**, before any app:
+- **Hold off overshoot:** delay another head's run with a small low-power offset (5a's `apply_offset`) while a hinted room is near the top of its band.
+- **Group heating:** with planned recovery (5b), unpark a room during another head's run before it needs one of its own.
+- **Emergency mode switch (5d).**
+
 ## Context
 
-**The house.** Three Mitsubishi indoor heads (main floor, primary bedroom,
-second bedroom) on **one shared outdoor unit**, a multi-split. So:
+**The house.** Three Mitsubishi indoor heads on **one shared outdoor unit**, a multi-split:
+- **Outdoor unit:** MXZ-5C42NAHZ2.
+- **Main floor:** an SVZ-KP30NA ducted air handler.
+- **Primary and second bedroom:** MLZ-KP09NA cassettes.
+
+So:
 
 - **Mode:** all heads must run in the same mode (heat or cool).
 - **Capacity:** the heads share the outdoor unit's capacity.
 - **Defrost and compressor starts** happen once, for all of them.
+- **Heat leaks between heads.** While any head runs, a powered idle head keeps receiving refrigerant and its fan blows that into its room: +0.16 °C/min in the second bedroom, +0.05 in the primary. Only switching the head off stops it. This is what Release 1 coordinates.
 
 Each head runs `climate_adaptivepid` (this repo) on an ESP32 over the `cn105`
 driver.
@@ -71,8 +128,10 @@ occasional manual adjustment.
 
 ## Goals
 
-The supervisor is an HA app (all computation) with a custom integration as its
-only connection to Home Assistant. Each room gets one target per mode, and
+These goals are for the later, unscheduled phases. As originally proposed, the
+supervisor was an HA app (all computation) with a custom integration as its
+only connection to Home Assistant; Release 1 showed the integration alone is
+enough for coordination, so the app is now optional. Each room gets one target per mode, and
 **comfort windows** set by the user: the times the room may be in use.
 
 - **Inside a window**, the room is held at target.
@@ -137,7 +196,7 @@ nothing to re-apply: offsets expire on the heads.
 ## How the parts communicate
 
 ```
-head ⇄ ESPHome native API ⇄ HA core ⇄ hvac_supervisor integration ⇄ websocket (internal Supervisor network, token) ⇄ HVAC Supervisor app
+head ⇄ ESPHome native API ⇄ HA core ⇄ climate_adaptivepid_supervisor integration ⇄ websocket (internal Supervisor network, token) ⇄ HVAC Supervisor app
 ```
 
 - **App:** the websocket server; computes everything. It has no Home Assistant
@@ -189,19 +248,19 @@ head ⇄ ESPHome native API ⇄ HA core ⇄ hvac_supervisor integration ⇄ webs
 
 Additions to this repo:
 
-- **`repository.yaml` + `hvac_supervisor/`:** the Home Assistant app.
+- **`repository.yaml` + `climate_adaptivepid_supervisor/`:** the Home Assistant app.
   - `config.yaml`:
     - `image: <registry>/hvac-supervisor`, as one multi-arch manifest for
       amd64 and aarch64 (fallback: one image per architecture,
       `hvac-supervisor-{arch}`). The Home Assistant host must be able to pull
       it: either a public registry project, or a registry login added under
       App store → ⋮ → Registries.
-    - `ingress: true`, `discovery: [hvac_supervisor]`.
+    - `ingress: true`, `discovery: [climate_adaptivepid_supervisor]`.
     - `hassio_api: true` (needed only to post discovery),
       `homeassistant_api: false`.
   - A Dockerfile and a Python package `supervisor_app/`: websocket server,
     SQLite store, model fit (scipy), planner, ingress UI.
-- **`custom_components/hvac_supervisor/` + `hacs.json`:** the integration.
+- **`custom_components/climate_adaptivepid_supervisor/` + `hacs.json`:** the integration.
   - Config flow (Supervisor discovery, with a manual host/port fallback).
   - Websocket client and state forwarder.
   - The emergency rule.
@@ -223,7 +282,7 @@ Additions to this repo:
 - **One version** is shared by `config.yaml`, `manifest.json` and a new
   `CLIMATE_ADAPTIVEPID_VERSION` constant in the component.
 - **To check while implementing:**
-  - The Home Assistant app store finds only `hvac_supervisor/config.yaml`, not
+  - The Home Assistant app store finds only `climate_adaptivepid_supervisor/config.yaml`, not
     the ESPHome YAML fixtures.
   - HACS accepts `custom_components/` next to ESPHome's `components/`.
 
@@ -243,7 +302,7 @@ Additions to this repo:
 - **Messages:** `config`, `states` and `history`. The app backfills about 10
   days from the recorder, then keeps its own 1-minute history in `/data`, which
   Home Assistant backups include.
-- **Integration entities:** `binary_sensor.hvac_supervisor_connected`, and per
+- **Integration entities:** `binary_sensor.climate_adaptivepid_supervisor_connected`, and per
   room `sensor.<room>_supervisor_status`.
 - **Ingress UI:** data coverage and a timeline per room.
 
@@ -418,7 +477,7 @@ control, then delete the automation. Drift values are in °C on the heads.
 - **Limits:**
   - at most one switch every 6 hours,
   - a persistent notification and a logbook entry with the reason,
-  - `switch.hvac_supervisor_emergency_mode` to disable it.
+  - `switch.climate_adaptivepid_supervisor_emergency_mode` to disable it.
 - **Writes:** `climate.set_hvac_mode` on the three adaptive PID climates. The
   existing mode automation is then deleted.
 
@@ -427,9 +486,9 @@ control, then delete the automation. Drift values are in °C on the heads.
 1. **Prerequisite:** Phases 0–2 running on all heads (done).
 2. **Development loop:**
    - Run tests locally, as CI does.
-   - **App on the host:** clone this repo into `/addons/hvac_supervisor` from
+   - **App on the host:** clone this repo into `/addons/climate_adaptivepid_supervisor` from
      the Terminal app. It appears under "Local apps" and builds on the host.
-   - **Integration on the host:** copy `custom_components/hvac_supervisor`
+   - **Integration on the host:** copy `custom_components/climate_adaptivepid_supervisor`
      into `/config/custom_components/`, then restart Home Assistant.
 3. **First release (4a):** tag the repo; CI pushes the image.
    - **App:** App store → ⋮ → Repositories → add this repo's URL (and a

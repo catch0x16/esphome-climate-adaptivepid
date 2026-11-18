@@ -47,6 +47,15 @@ namespace devicestate {
         // the rounded value stays inside [minAllowed, maxAllowed].
         virtual bool internalSetCorrectedTemperature(const float value, const float minAllowed, const float maxAllowed) = 0;
 
+        // Switch on with this setpoint instead of the user's target (start
+        // control: a parked head comes back idle, not running).
+        virtual bool internalTurnOnAt(const float setpoint) { (void) setpoint; return this->internalTurnOn(); }
+        // Stage a setpoint that is already one of the device's levels: rounded
+        // to the nearest step, with no deadband or directional rounding.
+        virtual bool internalSetDeviceTemperature(const float value) {
+            return this->internalSetCorrectedTemperature(value, value, value);
+        }
+
         virtual ~IDeviceStateManager() = default;
   };
 

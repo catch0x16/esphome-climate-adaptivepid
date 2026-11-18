@@ -71,7 +71,8 @@ climate:
 | `settle_time` | `2 × update_interval + 5s` | How long after a power command the inner climate's reported power is ignored. |
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
 | `outdoor_temperature_sensor` | none | Outdoor temperature for the room model's heat loss. Without it heat loss is not learned and is left out of the heating and cooling rates. |
-| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). |
+| `humidity_sensor` | none | Room humidity. With start control it confirms heat arriving from other heads on a shared outdoor unit (warm supply air dries the room). |
+| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`, `start_threshold`, `park_when_shared`, `park_margin`; see [Start control](#start-control). |
 | `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. With `off_delay` (default `0s`) a room past `off_threshold` is first held: the PID is pulled to its least output (target minus `max_adjustment_under` while heating) with its integral frozen, and the device is switched off only if the room is still past the threshold after `off_delay`, or at once past `off_limit` (default `off_threshold` + 0.5). Room sensors near the unit read past the target for a few minutes after each run; the delay keeps those brief peaks from forcing a full power-on start. |
 
 At least one of `pid` and `hysteresis` is required. The standard climate
@@ -87,7 +88,10 @@ adaptive tuning the learned room model: `Heating rate`, `Cooling rate`,
 or reconfigured under its key (`internal_power`, `device_power`, `operating`,
 `device_current_temperature`, `device_set_point`, `pid_set_point`, `pid_kp`,
 `pid_ki`, `heating_rate`, `cooling_rate`, `heat_loss`, `dead_time_heating`,
-`dead_time_cooling`). Anything device-specific, such as
+`dead_time_cooling`). With start control there are also `Control state`
+(0 IDLE, 1 START, 2 RUN, 3 PARKED), `Start threshold`, `Leak rate` and
+`Shared heat` (`control_state`, `start_threshold_sensor`, `leak_rate`,
+`shared_heat`). Anything device-specific, such as
 compressor frequency or energy, comes from the inner climate's own sensors.
 
 ### PID gains
@@ -111,20 +115,6 @@ for more heating or cooling than the PID did; the integral makes up the
 shortfall over time. The user's own target, when no correction applies, is
 rounded to nearest.
 
-Two options shape the setpoint so that moves towards more output are slow and
-moves towards less output are fast. Both are off by default:
-
-- `run_backoff` (°C): once the device reports it is running, its setpoint is
-  held at most this far below the temperature the device reported when it
-  started (above, when cooling). Mitsubishi units start heating once their
-  setpoint reaches the temperature they see, keep running 0.5°C below it and
-  stop at 1.0°C below, so `run_backoff: 0.5` runs the unit at its lowest demand
-  and lets it stop by itself as soon as its view of the room moves one step.
-- `increase_rate` (°C per minute): the most the setpoint may move towards more
-  output. Moves towards less output are never limited.
-
-While either holds the setpoint back, the PID's integral is frozen.
-
 `setpoint_deadband` (default 0.1°C) stops the device setpoint flipping between
 two steps while the correction hovers at a step boundary: a step towards more
 output is taken only once the correction is that far past the boundary, a step
@@ -137,6 +127,67 @@ multiple of the step. With a target between steps (67°F is 19.44°C) the usable
 range is narrower still: `max_adjustment_over: 0.5` reaches 19.5 at most.
 The integral stops accumulating while the offset is at a limit, and it is
 reset on a target change and while the device is switched off.
+
+### Start control
+
+For units whose own thermostat has only three levels, and for heads that share
+an outdoor unit. Off by default; the full design is in
+[docs/start-control-design.md](docs/start-control-design.md), and the
+measurements behind it in
+[docs/research/shared-outdoor-unit.md](docs/research/shared-outdoor-unit.md).
+
+A Mitsubishi head compares its setpoint with its own view of the room (the
+remote temperature, rounded to 0.5°C). At its view or above it starts within
+seconds; 0.5°C below it keeps running, and a stopped unit restarts on its own
+once its anti-short-cycle timer allows; 1.0°C below it stays off. Rounding a
+continuous PID output onto that grid turns small corrections into full starts.
+
+With `start_control: true` the PID only supplies demand, and a state machine
+sends one of three setpoints relative to the unit's view:
+
+| State | Setpoint | Entered when |
+|---|---|---|
+| IDLE | view − 1.0 | after every stop; the unit stays off |
+| START | view | the PID's demand reaches `start_threshold`, no heat is arriving from other heads, and the room isn't still rising |
+| RUN | view at start − 0.5 | the unit reports running; it stops by itself once its view moves one step, or is stopped early when the predicted peak reaches the target |
+| PARKED | device off | with `park_when_shared`, heat arrives from other heads and the room is within `park_margin` of the target; or hysteresis cut power |
+
+A powered head on a shared outdoor unit keeps receiving refrigerant while
+another head runs, and its fan carries that heat into the room. Only switching
+it off stops that, hence PARKED. A parked head is switched back on (idle) once
+demand reaches `start_threshold` − 0.2.
+
+- `start_threshold` (default 0.5°C) must be below `max_adjustment_over`. Once a
+  few runs are learned it follows the room: half the learned gain of a start.
+- `park_margin` (default 0.2°C) is replaced by the learned leak rate once known.
+- Heat arriving from other heads is detected on the head itself (the room
+  rising while the head is idle and past its own coast, with humidity falling
+  when `humidity_sensor` is set). A supervisor can also tell the head directly
+  with the `set_shared_heat_hint(active, valid_for_s)` and
+  `request_park(park, valid_for_s)` methods, exposed as ESPHome actions; the
+  hints expire on the head.
+- Hysteresis stays as the backstop: its off threshold still cuts power (at
+  once; `off_delay` is ignored), but it no longer switches the head on.
+- What start control learns is saved across reboots like the room model;
+  `reset_tuning()` clears it too.
+
+```yaml
+api:
+  actions:
+    - action: shared_heat
+      variables: {active: bool, valid_for_s: int}
+      then:
+        - lambda: id(hvac).set_shared_heat_hint(active, valid_for_s);
+    - action: request_park
+      variables: {park: bool, valid_for_s: int}
+      then:
+        - lambda: id(hvac).request_park(park, valid_for_s);
+```
+
+The [`climate_adaptivepid_supervisor`](custom_components/climate_adaptivepid_supervisor)
+Home Assistant integration (installable through HACS) sends those hints from
+the other heads' `Operating` sensors. See
+[docs/supervisor-design.md](docs/supervisor-design.md).
 
 ### Continuous tuning
 
@@ -263,7 +314,8 @@ effect.
 | Setpoint changed at the device in `HEAT`/`COOL` | Overwritten by the controller. |
 
 After a reboot, a restored `HEAT`/`COOL` with the device off is kept as is and
-hysteresis decides when to start it. Otherwise the outer climate starts from
+hysteresis (or, with start control, the start controller) decides when to
+switch it on. Otherwise the outer climate starts from
 the device's state.
 
 ## Development
@@ -283,8 +335,17 @@ uv run --locked esphome compile test.yaml
 uv run --locked esphome compile tests/fixtures/scenario.yaml
 tests/fixtures/.esphome/build/workflow-scenario/.pioenvs/workflow-scenario/program
 
+# Start control on the host (a smoke test of the wiring)
+uv run --locked esphome compile tests/fixtures/start_control.yaml
+tests/fixtures/.esphome/build/start-control-scenario/.pioenvs/start-control-scenario/program
+
 # Compile check against the upstream CN105 driver
 uv run --locked esphome compile tests/fixtures/cn105.yaml
+
+# Supervisor integration tests (an isolated environment with its own Home Assistant)
+uv run --isolated --no-project --python 3.13 \
+  --with pytest-homeassistant-custom-component \
+  pytest tests/supervisor -o pythonpath=. -o asyncio_mode=auto
 ```
 
 Layout of `components/climate_adaptivepid/`:
@@ -297,3 +358,9 @@ Layout of `components/climate_adaptivepid/`:
 - `tuning_rule.h`: the gains that follow from the model; no ESPHome dependency.
 - `tuning_store.h`: whether each learned value starts from what was learned or its seed at boot; no ESPHome dependency.
 - `controller_types.h`: the interface between the controller and the device.
+- `start_controller.h`, `shared_heat_detector.h`, `burst_learner.h`: start control; no ESPHome dependency.
+- `off_gate.h`: when hysteresis switches a running device off; no ESPHome dependency.
+
+`custom_components/climate_adaptivepid_supervisor/`: the Home Assistant
+integration that coordinates the heads of one outdoor unit; its decisions are
+in `logic.py`, with no Home Assistant dependency.

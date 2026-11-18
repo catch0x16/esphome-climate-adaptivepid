@@ -1,0 +1,87 @@
+# Start control on the host platform: a smoke test of the wiring (power-on
+# idle, supervisor park/unpark, the hysteresis backstop as a park, unpark on
+# demand). The demo climate does not behave like a Mitsubishi thermostat, so
+# start and stop timing are covered by the native tests, not here.
+#
+#   uv run --locked esphome compile tests/fixtures/start_control.yaml
+#   tests/fixtures/.esphome/build/start-control-scenario/.pioenvs/start-control-scenario/program
+esphome:
+  name: start-control-scenario
+  on_boot:
+    priority: -200
+    then:
+      - delay: 3s
+      - logger.log: "STEP 1: user selects HEAT 21 with the room at 20.6 -> device on at the idle setpoint (19.5)"
+      - climate.control:
+          id: outer
+          mode: HEAT
+          target_temperature: 21
+      - delay: 8s
+      - logger.log: "STEP 2: supervisor reports shared heat and asks to park -> device off, PARKED"
+      - lambda: |-
+          id(outer).set_shared_heat_hint(true, 60);
+          id(outer).request_park(true, 60);
+      - delay: 8s
+      - logger.log: "STEP 3: supervisor asks to unpark -> device on at the idle setpoint, IDLE"
+      - lambda: |-
+          id(outer).set_shared_heat_hint(false, 60);
+          id(outer).request_park(false, 5);
+      - delay: 10s
+      - logger.log: "STEP 4: room rises to 22 -> hysteresis backstop cuts power, PARKED"
+      - globals.set:
+          id: room
+          value: "22.0"
+      - delay: 10s
+      - logger.log: "STEP 5: room falls to 20 -> demand unparks the device on its own"
+      - globals.set:
+          id: room
+          value: "20.0"
+      - delay: 10s
+      - logger.log: "SCENARIO DONE"
+
+host:
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source: ../../components
+
+globals:
+  - id: room
+    type: float
+    initial_value: "20.6"
+
+demo:
+  climates:
+    - id: inner_climate
+      name: "Inner climate"
+      type: 2
+
+sensor:
+  - platform: template
+    id: room_temperature
+    name: "Room temperature"
+    unit_of_measurement: "°C"
+    update_interval: 1s
+    lambda: return id(room);
+
+climate:
+  - platform: climate_adaptivepid
+    id: outer
+    name: "Outer climate"
+    climate_id: inner_climate
+    temperature_sensor: room_temperature
+    update_interval: 1s
+    settle_time: 2s
+    pid:
+      kp: 1.0
+      ki: 0.0
+      max_adjustment_over: 1.0
+      start_control: true
+      start_threshold: 0.5
+      park_when_shared: true
+    hysteresis:
+      on_threshold: 0.25
+      off_threshold: 0.5
+      min_cycle_duration: 4s

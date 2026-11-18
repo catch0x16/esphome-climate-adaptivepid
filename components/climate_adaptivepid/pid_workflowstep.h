@@ -7,8 +7,10 @@
 #include "controller_types.h"
 
 #include "adaptive_pid.h"
-#include "output_shaper.h"
+#include "burst_learner.h"
 #include "room_model.h"
+#include "shared_heat_detector.h"
+#include "start_controller.h"
 #include "tuning_rule.h"
 
 namespace workflow {
@@ -21,7 +23,22 @@ namespace workflow {
             RoomModel model;
             float outdoorTemperature{NAN};
             bool holdLeast{false};
-            OutputShaper shaper;
+            float humidity{NAN};
+
+            // Start control (start_controller.h): replaces the PID -> rounded
+            // setpoint path when enabled.
+            bool startControl{false};
+            workflow::start::StartConfig startConfig{};
+            workflow::start::StartController startCtl;
+            workflow::start::SharedHeatDetector detector;
+            workflow::start::BurstLearner bursts;
+            float effectiveStartThreshold{NAN};
+            workflow::start::ParkHint parkHint{workflow::start::ParkHint::NONE};
+            uint32_t parkHintFromMs{0};
+            uint32_t parkHintValidMs{0};
+
+            void runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager);
+            workflow::start::ParkHint currentParkHint(uint32_t now) const;
             TuningConfig tuning;
 
             float minTemp;
@@ -65,12 +82,21 @@ namespace workflow {
             // Hold the device at the least output allowed (hysteresis is waiting
             // to switch it off); the integral is frozen meanwhile.
             void setHoldLeast(bool value) { this->holdLeast = value; }
-            // See OutputShaper: hold the setpoint run_backoff below the device's
-            // temperature at the start of a run; limit moves towards more output
-            // to increase_rate_per_s.
-            void setOutputShaping(float runBackoff, float increaseRatePerS) {
-                this->shaper.configure(runBackoff, increaseRatePerS);
-            }
+            // Room humidity for the shared-heat detector; NaN when unknown.
+            void setHumidity(float value) { this->humidity = value; }
+
+            // Start control (docs/start-control-design.md).
+            void configureStartControl(const workflow::start::StartConfig &config);
+            bool isStartControl() const { return this->startControl; }
+            workflow::start::HeadState startState() const { return this->startCtl.state(); }
+            bool sharedHeat() const;
+            float startThreshold() const { return this->effectiveStartThreshold; }
+            const workflow::start::BurstState &burstState() const { return this->bursts.state(); }
+            void restoreBurstState(const workflow::start::BurstState &state) { this->bursts.set_state(state); }
+            void resetBurstState() { this->bursts.reset(); }
+            // Supervisor hints; they expire after valid_ms.
+            void setSharedHeatHint(bool active, uint32_t validMs);
+            void requestPark(bool park, uint32_t validMs);
             // Start from a model state. A restored rate was learned before the
             // last reboot; a seeded one keeps the configured ki until that
             // mode's first measurement.

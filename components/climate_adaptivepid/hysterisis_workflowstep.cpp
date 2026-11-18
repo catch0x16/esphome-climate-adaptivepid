@@ -49,7 +49,7 @@ namespace workflow {
                 this->offGate.reset();
                 this->holding = false;
                 ESP_LOGI(TAG, "Not currently active while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
-                if (-result->delta > this->hysterisisOn) {
+                if (this->turnOnEnabled && -result->delta > this->hysterisisOn) {
                     ESP_LOGI(TAG, "Turn on while %s: delta={%f} current={%f} targetTemperature={%f}", result->label.c_str(), result->delta, result->currentTemperature, result->targetTemperature);
                     deviceManager->internalTurnOn();
                 }

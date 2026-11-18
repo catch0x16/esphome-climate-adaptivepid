@@ -124,6 +124,11 @@ namespace workflow {
                 }
             }
 
+            if (this->startControl) {
+                this->runStartControl(currentTemperature, deviceManager);
+                return;
+            }
+
             // if pid target is not updated and internal power is not on
             if (updatedPidTarget || deviceManager->isInternalPowerOn()) {
                 const float adjustMinOffset = deviceManager->getOffsetDirection()
@@ -146,38 +151,12 @@ namespace workflow {
                 this->adaptivePID->set_output_limits(adjustedMinTemp - target, adjustedMaxTemp - target);
                 const bool powerOn = deviceManager->isInternalPowerOn();
                 const bool holding = this->holdLeast && powerOn;
-                // The shaper held the output below the PID last time: do not let
-                // the integral build up against it.
-                this->adaptivePID->set_integral_frozen(this->shaper.limiting());
                 const float setPointCorrectionSimple = holding
                     ? this->adaptivePID->hold(currentTemperature, now)
                     : this->adaptivePID->update(currentTemperature, now, powerOn);
-                float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);
-                bool shaped = false;
-                if (this->shaper.enabled()) {
-                    if (holding) {
-                        this->shaper.reset();
-                    } else {
-                        const bool wasRunning = this->shaper.running();
-                        const devicestate::DeviceStatus status = deviceManager->getDeviceStatus();
-                        const float shapedValue = this->shaper.shape(adjustedSetPointCorrectionSimple,
-                            deviceManager->getOffsetDirection(), powerOn, powerOn && status.operating,
-                            status.currentTemperature, static_cast<uint32_t>(now));
-                        if (!wasRunning && this->shaper.running()) {
-                            if (std::isfinite(this->shaper.start_temperature())) {
-                                ESP_LOGI(TAG, "Device started seeing %.2f: setpoint held from there",
-                                    this->shaper.start_temperature());
-                            } else {
-                                ESP_LOGI(TAG, "Device started but reports no temperature: no run backoff");
-                            }
-                        }
-                        shaped = this->shaper.limiting();
-                        adjustedSetPointCorrectionSimple = devicestate::clamp(shapedValue, adjustedMinTemp, adjustedMaxTemp);
-                    }
-                }
-                ESP_LOGI(TAG, "PidWorkflowStep [Simple] setPointCorrection={%.2f} adjustedSetPoint={%.2f}%s%s kp={%.3f} ki={%.4f} kd={%.3f}",
+                const float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);
+                ESP_LOGI(TAG, "PidWorkflowStep [Simple] setPointCorrection={%.2f} adjustedSetPoint={%.2f}%s kp={%.3f} ki={%.4f} kd={%.3f}",
                     setPointCorrectionSimple, adjustedSetPointCorrectionSimple, holding ? " (held at least output)" : "",
-                    shaped ? " (shaped)" : "",
                     this->adaptivePID->kp(), this->adaptivePID->ki(), this->adaptivePID->kd());
 
                 if (deviceManager->internalSetCorrectedTemperature(
@@ -185,6 +164,132 @@ namespace workflow {
                     deviceManager->commit();
                 }
             }
+        }
+
+        void PidWorkflowStep::configureStartControl(const workflow::start::StartConfig &config) {
+            this->startControl = true;
+            this->startConfig = config;
+            this->startCtl.configure(config);
+        }
+
+        void PidWorkflowStep::setSharedHeatHint(bool active, uint32_t validMs) {
+            this->detector.set_hint(active, esphome::millis(), validMs);
+            ESP_LOGI(TAG, "Supervisor: shared heat %s for %u s", active ? "on" : "off",
+                static_cast<unsigned>(validMs / 1000));
+        }
+
+        void PidWorkflowStep::requestPark(bool park, uint32_t validMs) {
+            this->parkHint = park ? workflow::start::ParkHint::PARK : workflow::start::ParkHint::UNPARK;
+            this->parkHintFromMs = esphome::millis();
+            this->parkHintValidMs = validMs;
+            ESP_LOGI(TAG, "Supervisor: %s for %u s", park ? "park" : "unpark", static_cast<unsigned>(validMs / 1000));
+        }
+
+        bool PidWorkflowStep::sharedHeat() const { return this->detector.active(esphome::millis()); }
+
+        workflow::start::ParkHint PidWorkflowStep::currentParkHint(uint32_t now) const {
+            if (this->parkHintValidMs == 0 || static_cast<uint32_t>(now - this->parkHintFromMs) >= this->parkHintValidMs) {
+                return workflow::start::ParkHint::NONE;
+            }
+            return this->parkHint;
+        }
+
+        void PidWorkflowStep::runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager) {
+            using namespace workflow::start;
+            const uint32_t now = esphome::millis();
+            const bool heating = deviceManager->getOffsetDirection();
+            const float target = deviceManager->getTargetTemperature();
+            const float adjustMinOffset = heating ? this->maxAdjustmentUnder : this->maxAdjustmentOver;
+            const float adjustMaxOffset = heating ? this->maxAdjustmentOver : this->maxAdjustmentUnder;
+            const float adjustedMinTemp = devicestate::clamp(target - adjustMinOffset, this->minTemp, this->maxTemp);
+            const float adjustedMaxTemp = devicestate::clamp(target + adjustMaxOffset, this->minTemp, this->maxTemp);
+            this->adaptivePID->set_output_limits(adjustedMinTemp - target, adjustedMaxTemp - target);
+
+            const bool powered = deviceManager->isInternalPowerOn();
+            const devicestate::DeviceStatus status = deviceManager->getDeviceStatus();
+            const bool operating = powered && status.operating;
+
+            // The PID only supplies demand here. It keeps running while the head
+            // is parked, so demand can switch it back on; its integral is frozen
+            // whenever the controller holds the output below what it asks for.
+            const float output = this->adaptivePID->update(currentTemperature, now, true);
+            const float demand = heating ? output - target : target - output;
+            // Demand is capped at the PID's output limit; a threshold at or past
+            // it could never start the unit.
+            const float demandCap = heating ? adjustedMaxTemp - target : target - adjustedMinTemp;
+
+            // Thresholds: learned values once there are enough runs, else configured.
+            float startThreshold = this->startConfig.start_threshold;
+            const float gain = this->bursts.gain_alone();
+            if (std::isfinite(gain)) {
+                startThreshold = devicestate::clamp(this->adaptivePID->kp() * gain * 0.5f, 0.2f, 3.0f);
+            }
+            if (startThreshold > demandCap - 0.05f) {
+                startThreshold = demandCap - 0.05f;
+            }
+            this->effectiveStartThreshold = startThreshold;
+            this->startCtl.set_start_threshold(startThreshold);
+            float parkMargin = this->startConfig.park_margin;
+            const float leak = this->bursts.leak_per_min();
+            if (std::isfinite(leak)) {
+                // Detection takes about the detector's window (2 min); park that much early.
+                parkMargin = devicestate::clamp(leak * 2.0f, 0.1f, 0.6f);
+            }
+            this->startCtl.set_park_margin(parkMargin);
+
+            // Shared heat: only while the head is powered, idle and past its own coast.
+            const bool eligible = powered && !operating && this->startCtl.state() == HeadState::IDLE &&
+                                  !this->bursts.coasting() &&
+                                  this->startCtl.since_stop_ms(now) >= this->bursts.coast_time_ms();
+            this->detector.update(now, heating, eligible, currentTemperature, this->humidity);
+            const bool shared = this->detector.active(now);
+
+            StartInput in;
+            in.now_ms = now;
+            in.heating = heating;
+            in.powered = powered;
+            in.operating = operating;
+            in.device_view = status.currentTemperature;
+            in.room = currentTemperature;
+            in.target = target;
+            in.demand = demand;
+            in.room_rising = this->detector.rising(now);
+            in.shared_heat = shared;
+            in.coast = this->bursts.coast(shared);
+            in.hint = this->currentParkHint(now);
+            const StartDecision decision = this->startCtl.update(in);
+            this->adaptivePID->set_integral_frozen(decision.freeze_integral);
+
+            if (this->bursts.update(now, heating, decision.state, powered, currentTemperature, shared)) {
+                const BurstState &b = this->bursts.state();
+                ESP_LOGI(TAG, "Start control learned: gain alone %.2f (%u runs), shared %.2f (%u runs); coast alone %.2f, shared %.2f, after %.1f min; leak %.3f C/min (%u)",
+                    b.gain[0], static_cast<unsigned>(b.gain_count[0]), b.gain[1], static_cast<unsigned>(b.gain_count[1]),
+                    b.coast[0], b.coast[1], b.coast_time_s / 60.0f, b.leak_per_min, static_cast<unsigned>(b.leak_count));
+            }
+            if (decision.transition != Transition::NONE) {
+                ESP_LOGI(TAG, "Start control: %s -> %s (room %.2f, target %.2f, demand %.2f / %.2f, unit sees %.1f, shared heat %s%s)",
+                    transition_to_string(decision.transition), head_state_to_string(decision.state),
+                    currentTemperature, target, demand, startThreshold, status.currentTemperature,
+                    YESNO(shared), this->detector.hint_valid(now) ? " (supervisor)" : "");
+            }
+
+            switch (decision.power) {
+                case PowerRequest::TURN_OFF:
+                    deviceManager->internalTurnOff();
+                    break;
+                case PowerRequest::TURN_ON:
+                    deviceManager->internalTurnOnAt(decision.setpoint);
+                    break;
+                case PowerRequest::NONE:
+                    if (powered && std::isfinite(decision.setpoint) &&
+                        deviceManager->internalSetDeviceTemperature(decision.setpoint)) {
+                        deviceManager->commit();
+                    }
+                    break;
+            }
+            ESP_LOGD(TAG, "Start control %s: demand %.2f (start %.2f), setpoint %.1f, room %s, shared heat %s",
+                head_state_to_string(decision.state), demand, startThreshold, decision.setpoint,
+                in.room_rising ? "rising" : "steady", YESNO(shared));
         }
 
     }

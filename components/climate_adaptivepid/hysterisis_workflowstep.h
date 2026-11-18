@@ -27,6 +27,7 @@ namespace workflow {
             float hysterisisOff;
             OffGate offGate;
             bool holding{false};
+            bool turnOnEnabled{true};
         
             void executeHysterisisWorkflowStep(HysterisisResult* result, devicestate::IDeviceStateManager* deviceManager);
             HysterisisResult getHysterisisResult(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager);
@@ -47,6 +48,10 @@ namespace workflow {
             // Past the off threshold and waiting out the delay: the PID should
             // hold the device at its least output.
             bool isHolding() const { return this->holding; }
+
+            // With start control the head is switched on by the start
+            // controller; hysteresis only cuts power past its off threshold.
+            void setTurnOnEnabled(bool value) { this->turnOnEnabled = value; }
         };
 
     }

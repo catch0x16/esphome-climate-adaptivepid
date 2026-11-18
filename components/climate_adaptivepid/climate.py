@@ -19,6 +19,7 @@ CONF_CLIMATE_ID = "climate_id"
 CONF_TEMPERATURE_SENSOR = "temperature_sensor"
 CONF_READY_SENSOR = "ready_sensor"
 CONF_OUTDOOR_TEMPERATURE_SENSOR = "outdoor_temperature_sensor"
+CONF_HUMIDITY_SENSOR = "humidity_sensor"
 CONF_SETTLE_TIME = "settle_time"
 
 CONF_PID = "pid"
@@ -28,8 +29,10 @@ CONF_KD = "kd"
 CONF_MAX_ADJUSTMENT_UNDER = "max_adjustment_under"
 CONF_MAX_ADJUSTMENT_OVER = "max_adjustment_over"
 CONF_SETPOINT_DEADBAND = "setpoint_deadband"
-CONF_RUN_BACKOFF = "run_backoff"
-CONF_INCREASE_RATE = "increase_rate"
+CONF_START_CONTROL = "start_control"
+CONF_START_THRESHOLD = "start_threshold"
+CONF_PARK_WHEN_SHARED = "park_when_shared"
+CONF_PARK_MARGIN = "park_margin"
 
 CONF_ADAPTIVE = "adaptive"
 CONF_RESPONSE_TIME = "response_time"
@@ -61,6 +64,10 @@ CONF_COOLING_RATE = "cooling_rate"
 CONF_HEAT_LOSS = "heat_loss"
 CONF_DEAD_TIME_HEATING = "dead_time_heating"
 CONF_DEAD_TIME_COOLING = "dead_time_cooling"
+CONF_CONTROL_STATE = "control_state"
+CONF_START_THRESHOLD_SENSOR = "start_threshold_sensor"
+CONF_LEAK_RATE = "leak_rate"
+CONF_SHARED_HEAT = "shared_heat"
 
 climate_adaptivepid_ns = cg.esphome_ns.namespace("climate_adaptivepid")
 ClimateAdaptivePID = climate_adaptivepid_ns.class_(
@@ -79,12 +86,20 @@ PID_SCHEMA = cv.Schema(
         cv.Optional(CONF_SETPOINT_DEADBAND, default=0.1): cv.float_range(
             min=0.0, max=1.0
         ),
-        # Once the device starts, hold its setpoint this far below the
-        # temperature it reported at the start (above when cooling). 0: off.
-        cv.Optional(CONF_RUN_BACKOFF, default=0.0): cv.float_range(min=0.0, max=3.0),
-        # Most the setpoint may move towards more output, in degrees per
-        # minute; moves towards less output are not limited. 0: no limit.
-        cv.Optional(CONF_INCREASE_RATE, default=0.0): cv.float_range(min=0.0, max=10.0),
+        # Start control (docs/start-control-design.md): the PID supplies demand,
+        # and a state machine decides when the unit starts, sending one of three
+        # setpoints relative to the unit's own view of the room. For units whose
+        # thermostat starts at setpoint >= its view and stops at <= view - 1.0.
+        cv.Optional(CONF_START_CONTROL, default=False): cv.boolean,
+        # PID demand (output - target, C) that starts a run. Learned from the
+        # room's response once there are enough runs.
+        cv.Optional(CONF_START_THRESHOLD, default=0.5): cv.float_range(
+            min=0.1, max=3.0
+        ),
+        # Switch the device off while heat arrives from other heads on a shared
+        # outdoor unit and the room is within park_margin of the target.
+        cv.Optional(CONF_PARK_WHEN_SHARED, default=False): cv.boolean,
+        cv.Optional(CONF_PARK_MARGIN, default=0.2): cv.float_range(min=0.0, max=2.0),
         # Continuous tuning: kp and ki follow the measured response of the room.
         # The configured kp and ki are then only the starting values.
         cv.Optional(CONF_ADAPTIVE, default=True): cv.boolean,
@@ -109,6 +124,24 @@ PID_SCHEMA = cv.Schema(
         cv.Optional(CONF_INITIAL_HEAT_LOSS): cv.float_range(min=0.0, max=2.0),
     }
 )
+
+
+def _validate_start_control(conf):
+    if conf[CONF_PARK_WHEN_SHARED] and not conf[CONF_START_CONTROL]:
+        raise cv.Invalid(
+            f"{CONF_PARK_WHEN_SHARED} requires {CONF_START_CONTROL}",
+            path=[CONF_PARK_WHEN_SHARED],
+        )
+    if conf[CONF_START_CONTROL] and conf[CONF_START_THRESHOLD] >= conf[CONF_MAX_ADJUSTMENT_OVER]:
+        raise cv.Invalid(
+            f"{CONF_START_THRESHOLD} must be below {CONF_MAX_ADJUSTMENT_OVER}: the PID's "
+            "demand is capped there, so the unit could never start",
+            path=[CONF_START_THRESHOLD],
+        )
+    return conf
+
+
+PID_SCHEMA = cv.All(PID_SCHEMA, _validate_start_control)
 
 
 def _gain_sensor_schema(decimals, unit=None):
@@ -180,6 +213,9 @@ CONFIG_SCHEMA = cv.All(
             # Lets the room model learn heat loss and take it out of the
             # heating and cooling rates.
             cv.Optional(CONF_OUTDOOR_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
+            # Room humidity, used with start control to confirm heat arriving
+            # from other heads (warm supply air dries the room).
+            cv.Optional(CONF_HUMIDITY_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(
                 CONF_UPDATE_INTERVAL, default="2s"
             ): cv.positive_time_period_milliseconds,
@@ -227,6 +263,20 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_DEAD_TIME_COOLING, default={CONF_NAME: "Dead time cooling"}
             ): _gain_sensor_schema(1, "min"),
+            # Created only with start control. Control state: 0 IDLE, 1 START,
+            # 2 RUN, 3 PARKED.
+            cv.Optional(
+                CONF_CONTROL_STATE, default={CONF_NAME: "Control state"}
+            ): _gain_sensor_schema(0),
+            cv.Optional(
+                CONF_START_THRESHOLD_SENSOR, default={CONF_NAME: "Start threshold"}
+            ): _gain_sensor_schema(2, "°C"),
+            cv.Optional(
+                CONF_LEAK_RATE, default={CONF_NAME: "Leak rate"}
+            ): _gain_sensor_schema(2, "°C/h"),
+            cv.Optional(
+                CONF_SHARED_HEAT, default={CONF_NAME: "Shared heat"}
+            ): _power_sensor_schema(DEVICE_CLASS_RUNNING),
         }
     )
     .extend(cv.COMPONENT_SCHEMA),
@@ -251,6 +301,9 @@ async def to_code(config):
     if CONF_OUTDOOR_TEMPERATURE_SENSOR in config:
         outdoor = await cg.get_variable(config[CONF_OUTDOOR_TEMPERATURE_SENSOR])
         cg.add(var.set_outdoor_temperature_sensor(outdoor))
+    if CONF_HUMIDITY_SENSOR in config:
+        humidity = await cg.get_variable(config[CONF_HUMIDITY_SENSOR])
+        cg.add(var.set_humidity_sensor(humidity))
 
     update_interval = config[CONF_UPDATE_INTERVAL]
     cg.add(var.set_update_interval(update_interval))
@@ -269,8 +322,10 @@ async def to_code(config):
         cg.add(var.set_max_adjustment_under(conf[CONF_MAX_ADJUSTMENT_UNDER]))
         cg.add(var.set_max_adjustment_over(conf[CONF_MAX_ADJUSTMENT_OVER]))
         cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
-        cg.add(var.set_run_backoff(conf[CONF_RUN_BACKOFF]))
-        cg.add(var.set_increase_rate(conf[CONF_INCREASE_RATE]))
+        cg.add(var.set_start_control(conf[CONF_START_CONTROL]))
+        cg.add(var.set_start_threshold(conf[CONF_START_THRESHOLD]))
+        cg.add(var.set_park_when_shared(conf[CONF_PARK_WHEN_SHARED]))
+        cg.add(var.set_park_margin(conf[CONF_PARK_MARGIN]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))
@@ -326,3 +381,15 @@ async def to_code(config):
                 (CONF_DEAD_TIME_COOLING, var.set_dead_time_cooling_sensor),
             ):
                 cg.add(setter(await sensor.new_sensor(config[key])))
+        if config[CONF_PID][CONF_START_CONTROL]:
+            for key, setter in (
+                (CONF_CONTROL_STATE, var.set_control_state_sensor),
+                (CONF_START_THRESHOLD_SENSOR, var.set_start_threshold_sensor),
+                (CONF_LEAK_RATE, var.set_leak_rate_sensor),
+            ):
+                cg.add(setter(await sensor.new_sensor(config[key])))
+            cg.add(
+                var.set_shared_heat_sensor(
+                    await binary_sensor.new_binary_sensor(config[CONF_SHARED_HEAT])
+                )
+            )

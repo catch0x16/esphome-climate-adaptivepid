@@ -154,6 +154,22 @@ bool ClimateDeviceAdapter::internalTurnOn() {
   return true;
 }
 
+bool ClimateDeviceAdapter::internalTurnOnAt(const float setpoint) {
+  const uint32_t now = millis();
+  if (this->throttled_(now)) {
+    ESP_LOGD(TAG, "Throttling internal turn on");
+    return false;
+  }
+  this->corrected_ = std::isfinite(setpoint) ? this->clamp_target(setpoint) : this->target_;
+  this->send_on_(now);
+  this->last_power_change_ms_ = now;
+  return true;
+}
+
+bool ClimateDeviceAdapter::internalSetDeviceTemperature(const float value) {
+  return this->stage_target_(value, this->min_temp_, this->max_temp_, devicestate::StepRounding::Nearest);
+}
+
 bool ClimateDeviceAdapter::internalTurnOff() {
   const uint32_t now = millis();
   if (this->throttled_(now)) {

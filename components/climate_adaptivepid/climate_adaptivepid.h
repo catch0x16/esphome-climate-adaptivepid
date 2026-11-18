@@ -32,6 +32,8 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_temperature_sensor(sensor::Sensor *sensor);
   void set_ready_sensor(binary_sensor::BinarySensor *sensor) { this->ready_sensor_ = sensor; }
   void set_outdoor_temperature_sensor(sensor::Sensor *sensor) { this->outdoor_temperature_sensor_ = sensor; }
+  // Room humidity, for the shared-heat detector (start control).
+  void set_humidity_sensor(sensor::Sensor *sensor) { this->humidity_sensor_ = sensor; }
 
   void set_internal_power_sensor(binary_sensor::BinarySensor *sensor) { this->internal_power_sensor_ = sensor; }
   void set_device_power_sensor(binary_sensor::BinarySensor *sensor) { this->device_power_sensor_ = sensor; }
@@ -48,6 +50,10 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_heat_loss_sensor(sensor::Sensor *sensor) { this->heat_loss_sensor_ = sensor; }
   void set_dead_time_heating_sensor(sensor::Sensor *sensor) { this->dead_time_heating_sensor_ = sensor; }
   void set_dead_time_cooling_sensor(sensor::Sensor *sensor) { this->dead_time_cooling_sensor_ = sensor; }
+  void set_control_state_sensor(sensor::Sensor *sensor) { this->control_state_sensor_ = sensor; }
+  void set_start_threshold_sensor(sensor::Sensor *sensor) { this->start_threshold_sensor_ = sensor; }
+  void set_leak_rate_sensor(sensor::Sensor *sensor) { this->leak_rate_sensor_ = sensor; }
+  void set_shared_heat_sensor(binary_sensor::BinarySensor *sensor) { this->shared_heat_sensor_ = sensor; }
 
   void set_update_interval(uint32_t value) { this->update_interval_ = value; }
   void set_settle_time(uint32_t value) { this->settle_ms_ = value; }
@@ -59,9 +65,11 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_max_adjustment_under(float value) { this->max_adjustment_under_ = value; }
   void set_max_adjustment_over(float value) { this->max_adjustment_over_ = value; }
   void set_setpoint_deadband(float value) { this->setpoint_deadband_ = value; }
-  void set_run_backoff(float value) { this->run_backoff_ = value; }
-  // Degrees per minute.
-  void set_increase_rate(float value) { this->increase_rate_ = value; }
+  // Start control (docs/start-control-design.md).
+  void set_start_control(bool value) { this->start_control_ = value; }
+  void set_start_threshold(float value) { this->start_threshold_ = value; }
+  void set_park_when_shared(bool value) { this->park_when_shared_ = value; }
+  void set_park_margin(float value) { this->park_margin_ = value; }
   void set_pid_adaptive(bool value) { this->tuning_.adaptive = value; }
   void set_pid_response_time(uint32_t ms) { this->tuning_.response_time_s = ms / 1000.0f; }
   void set_pid_dead_time(uint32_t ms) { this->tuning_.dead_time_s = ms / 1000.0f; }
@@ -91,6 +99,12 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
 
   // Forget the learned room model and start from the configured seeds.
   void reset_tuning();
+
+  // Supervisor hints for start control, each valid for valid_for_s seconds:
+  // whether heat (cooling) is arriving from other heads, and a request to park
+  // (switch the device off) or unpark. They expire on the head.
+  void set_shared_heat_hint(bool active, uint32_t valid_for_s);
+  void request_park(bool park, uint32_t valid_for_s);
 
  protected:
   static constexpr uint32_t TARGETS_VERSION = 1;
@@ -130,6 +144,14 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // At most one flash write per this interval.
   static constexpr uint32_t TUNING_SAVE_INTERVAL_MS = 60 * 60 * 1000;
 
+  // What start control learned (burst_learner.h).
+  static constexpr uint32_t BURSTS_VERSION = 1;
+  static constexpr uint32_t BURSTS_PREFERENCE_TYPE = 0x57464C42UL;
+  struct StoredBursts {
+    uint32_t version;
+    workflow::start::BurstState state;
+  };
+
   climate::ClimateTraits traits() override { return this->traits_; }
   void control(const climate::ClimateCall &call) override;
 
@@ -148,6 +170,12 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // once per TUNING_SAVE_INTERVAL_MS.
   void save_tuning_(uint32_t now, bool force);
   void log_model_(const char *prefix) const;
+  bool start_control_active_() const;
+  // The setpoint that keeps the device idle under start control: two steps
+  // below its view of the room (above, when cooling).
+  float idle_setpoint_() const;
+  void load_bursts_();
+  void save_bursts_(uint32_t now, bool force);
 
   bool is_workflow_mode_(climate::ClimateMode mode) const {
     return mode == climate::CLIMATE_MODE_HEAT || mode == climate::CLIMATE_MODE_COOL;
@@ -168,6 +196,7 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   sensor::Sensor *temperature_sensor_{nullptr};
   binary_sensor::BinarySensor *ready_sensor_{nullptr};
   sensor::Sensor *outdoor_temperature_sensor_{nullptr};
+  sensor::Sensor *humidity_sensor_{nullptr};
 
   binary_sensor::BinarySensor *internal_power_sensor_{nullptr};
   binary_sensor::BinarySensor *device_power_sensor_{nullptr};
@@ -182,6 +211,10 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   sensor::Sensor *heat_loss_sensor_{nullptr};
   sensor::Sensor *dead_time_heating_sensor_{nullptr};
   sensor::Sensor *dead_time_cooling_sensor_{nullptr};
+  sensor::Sensor *control_state_sensor_{nullptr};
+  sensor::Sensor *start_threshold_sensor_{nullptr};
+  sensor::Sensor *leak_rate_sensor_{nullptr};
+  binary_sensor::BinarySensor *shared_heat_sensor_{nullptr};
 
   climate::ClimateTraits traits_;
   ClimateDeviceAdapter device_;
@@ -189,6 +222,9 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   workflow::pid::PidWorkflowStep *pid_step_{nullptr};
   workflow::pid::TuningConfig tuning_{};
   ESPPreferenceObject tuning_preference_;
+  ESPPreferenceObject bursts_preference_;
+  StoredBursts stored_bursts_{};
+  uint32_t last_bursts_save_{0};
   StoredTuning stored_tuning_{};
   uint32_t last_tuning_save_{0};
   float initial_heat_rate_{NAN};
@@ -218,8 +254,10 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   float max_adjustment_under_{2.0f};
   float max_adjustment_over_{2.0f};
   float setpoint_deadband_{0.0f};
-  float run_backoff_{0.0f};
-  float increase_rate_{0.0f};
+  bool start_control_{false};
+  float start_threshold_{0.5f};
+  bool park_when_shared_{false};
+  float park_margin_{0.2f};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
   float hysteresis_off_limit_{NAN};

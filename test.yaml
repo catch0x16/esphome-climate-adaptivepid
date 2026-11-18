@@ -11,6 +11,19 @@ api:
     - action: reset_tuning
       then:
         - lambda: id(test_heatpump).reset_tuning();
+    # Supervisor hints (docs/start-control-design.md).
+    - action: shared_heat
+      variables:
+        active: bool
+        valid_for_s: int
+      then:
+        - lambda: id(test_heatpump).set_shared_heat_hint(active, valid_for_s);
+    - action: request_park
+      variables:
+        park: bool
+        valid_for_s: int
+      then:
+        - lambda: id(test_heatpump).request_park(park, valid_for_s);
 
 external_components:
   - source: components
@@ -38,6 +51,14 @@ sensor:
     lambda: return 21.0;
 
   - platform: template
+    id: room_humidity
+    name: "Room humidity"
+    unit_of_measurement: "%"
+    device_class: humidity
+    update_interval: 10s
+    lambda: return 55.0;
+
+  - platform: template
     id: outdoor_temperature
     name: "Outdoor temperature"
     unit_of_measurement: "°C"
@@ -52,6 +73,7 @@ climate:
     climate_id: inner_climate
     temperature_sensor: room_temperature
     outdoor_temperature_sensor: outdoor_temperature
+    humidity_sensor: room_humidity
     update_interval: 2s
     visual:
       min_temperature: 16
@@ -62,8 +84,10 @@ climate:
       kd: 0.0
       max_adjustment_under: 2.0
       max_adjustment_over: 2.0
-      run_backoff: 0.5
-      increase_rate: 0.1
+      start_control: true
+      start_threshold: 0.5
+      park_when_shared: true
+      park_margin: 0.2
       initial_heat_rate: 2.5
       initial_cool_rate: 1.5
     hysteresis:

@@ -75,6 +75,8 @@ class ClimateDeviceAdapter : public devicestate::IDeviceStateManager {
   bool internalTurnOff() override;
   bool isInternalPowerOn() override { return this->tracker_.commanded_on(); }
   bool internalSetCorrectedTemperature(const float value, const float minAllowed, const float maxAllowed) override;
+  bool internalTurnOnAt(const float setpoint) override;
+  bool internalSetDeviceTemperature(const float value) override;
 
  protected:
   bool throttled_(uint32_t now) const;
