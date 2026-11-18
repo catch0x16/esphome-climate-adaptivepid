@@ -107,7 +107,7 @@ float AdaptivePID::update(float current_temp, uint32_t current_time_ms, bool sys
     const float candidate_output = p + _ki * candidate_integral + d;
     const bool winding_up = (candidate_output > _output_max_offset && error > 0.0f) ||
                             (candidate_output < _output_min_offset && error < 0.0f);
-    if (!winding_up) {
+    if (!winding_up && !_integral_frozen) {
         _integral = candidate_integral;
     }
     clamp_integral();

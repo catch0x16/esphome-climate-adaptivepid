@@ -297,6 +297,7 @@ void ClimateAdaptivePID::setup() {
       this->mark_failed();
       return;
     }
+    this->pid_step_->setOutputShaping(this->run_backoff_, this->increase_rate_ / 60.0f);
   }
 
   this->targets_preference_ = this->make_entity_preference<StoredTargets>(0x57464C57UL);
@@ -666,6 +667,10 @@ void ClimateAdaptivePID::dump_config() {
     ESP_LOGCONFIG(TAG, "  PID: kp=%.3f ki=%.4f kd=%.3f, adjustment -%.2f/+%.2f, setpoint deadband %.2f", this->kp_,
                   this->ki_, this->kd_, this->max_adjustment_under_, this->max_adjustment_over_,
                   this->setpoint_deadband_);
+    if (this->run_backoff_ > 0.0f || this->increase_rate_ > 0.0f) {
+      ESP_LOGCONFIG(TAG, "  PID output shaping: run backoff %.2f, increase rate %.2f/min", this->run_backoff_,
+                    this->increase_rate_);
+    }
     if (this->tuning_.adaptive) {
       ESP_LOGCONFIG(TAG, "  PID tuning: adaptive, response time %.0f s, dead time %.0f s, kp %.2f..%.2f",
                     this->tuning_.response_time_s, this->tuning_.dead_time_s, this->tuning_.kp_min,

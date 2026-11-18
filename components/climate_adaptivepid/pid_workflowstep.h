@@ -7,6 +7,7 @@
 #include "controller_types.h"
 
 #include "adaptive_pid.h"
+#include "output_shaper.h"
 #include "room_model.h"
 #include "tuning_rule.h"
 
@@ -20,6 +21,7 @@ namespace workflow {
             RoomModel model;
             float outdoorTemperature{NAN};
             bool holdLeast{false};
+            OutputShaper shaper;
             TuningConfig tuning;
 
             float minTemp;
@@ -63,6 +65,12 @@ namespace workflow {
             // Hold the device at the least output allowed (hysteresis is waiting
             // to switch it off); the integral is frozen meanwhile.
             void setHoldLeast(bool value) { this->holdLeast = value; }
+            // See OutputShaper: hold the setpoint run_backoff below the device's
+            // temperature at the start of a run; limit moves towards more output
+            // to increase_rate_per_s.
+            void setOutputShaping(float runBackoff, float increaseRatePerS) {
+                this->shaper.configure(runBackoff, increaseRatePerS);
+            }
             // Start from a model state. A restored rate was learned before the
             // last reboot; a seeded one keeps the configured ki until that
             // mode's first measurement.

@@ -111,6 +111,20 @@ for more heating or cooling than the PID did; the integral makes up the
 shortfall over time. The user's own target, when no correction applies, is
 rounded to nearest.
 
+Two options shape the setpoint so that moves towards more output are slow and
+moves towards less output are fast. Both are off by default:
+
+- `run_backoff` (°C): once the device reports it is running, its setpoint is
+  held at most this far below the temperature the device reported when it
+  started (above, when cooling). Mitsubishi units start heating once their
+  setpoint reaches the temperature they see, keep running 0.5°C below it and
+  stop at 1.0°C below, so `run_backoff: 0.5` runs the unit at its lowest demand
+  and lets it stop by itself as soon as its view of the room moves one step.
+- `increase_rate` (°C per minute): the most the setpoint may move towards more
+  output. Moves towards less output are never limited.
+
+While either holds the setpoint back, the PID's integral is frozen.
+
 `setpoint_deadband` (default 0.1°C) stops the device setpoint flipping between
 two steps while the correction hovers at a step boundary: a step towards more
 output is taken only once the correction is that far past the boundary, a step

@@ -28,6 +28,8 @@ CONF_KD = "kd"
 CONF_MAX_ADJUSTMENT_UNDER = "max_adjustment_under"
 CONF_MAX_ADJUSTMENT_OVER = "max_adjustment_over"
 CONF_SETPOINT_DEADBAND = "setpoint_deadband"
+CONF_RUN_BACKOFF = "run_backoff"
+CONF_INCREASE_RATE = "increase_rate"
 
 CONF_ADAPTIVE = "adaptive"
 CONF_RESPONSE_TIME = "response_time"
@@ -77,6 +79,12 @@ PID_SCHEMA = cv.Schema(
         cv.Optional(CONF_SETPOINT_DEADBAND, default=0.1): cv.float_range(
             min=0.0, max=1.0
         ),
+        # Once the device starts, hold its setpoint this far below the
+        # temperature it reported at the start (above when cooling). 0: off.
+        cv.Optional(CONF_RUN_BACKOFF, default=0.0): cv.float_range(min=0.0, max=3.0),
+        # Most the setpoint may move towards more output, in degrees per
+        # minute; moves towards less output are not limited. 0: no limit.
+        cv.Optional(CONF_INCREASE_RATE, default=0.0): cv.float_range(min=0.0, max=10.0),
         # Continuous tuning: kp and ki follow the measured response of the room.
         # The configured kp and ki are then only the starting values.
         cv.Optional(CONF_ADAPTIVE, default=True): cv.boolean,
@@ -261,6 +269,8 @@ async def to_code(config):
         cg.add(var.set_max_adjustment_under(conf[CONF_MAX_ADJUSTMENT_UNDER]))
         cg.add(var.set_max_adjustment_over(conf[CONF_MAX_ADJUSTMENT_OVER]))
         cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
+        cg.add(var.set_run_backoff(conf[CONF_RUN_BACKOFF]))
+        cg.add(var.set_increase_rate(conf[CONF_INCREASE_RATE]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))

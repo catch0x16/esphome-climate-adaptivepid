@@ -96,6 +96,10 @@ climate:
     pid:
       kp: 1.5
       ki: 0.015
+      # Rises of more than 0.6 C/min are spread out; the demo climate reports no
+      # action, so run_backoff never engages here.
+      run_backoff: 0.5
+      increase_rate: 0.6
     hysteresis:
       on_threshold: 0.25
       off_threshold: 0.5

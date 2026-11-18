@@ -122,6 +122,19 @@ int main() {
     check(near(cool.hold(23.0f, 1000), 27.0f), "hold: cooling holds at target plus the under limit");
   }
 
+  {
+    // A frozen integral does not accumulate; proportional action continues.
+    AdaptivePID pid = make(1.0f, 0.001f, 0.0f);
+    pid.update(20.5f, 1000, true);
+    pid.set_integral_frozen(true);
+    for (uint32_t t = 3000; t <= 303000; t += 2000) pid.update(20.5f, t, true);
+    check(near(pid.integral(), 0.0f), "frozen: integral does not accumulate");
+    check(near(pid.update(20.0f, 305000, true), 22.0f), "frozen: proportional action still applies");
+    pid.set_integral_frozen(false);
+    pid.update(20.0f, 307000, true);
+    check(pid.integral() > 0.0f, "frozen: accumulates again once released");
+  }
+
   if (failures != 0) {
     std::printf("%d failure(s)\n", failures);
     return EXIT_FAILURE;

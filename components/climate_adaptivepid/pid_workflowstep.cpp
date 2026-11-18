@@ -144,13 +144,40 @@ namespace workflow {
                 // The PID knows the range it may use, so its integral stops
                 // accumulating once the setpoint is pinned at either end.
                 this->adaptivePID->set_output_limits(adjustedMinTemp - target, adjustedMaxTemp - target);
-                const bool holding = this->holdLeast && deviceManager->isInternalPowerOn();
+                const bool powerOn = deviceManager->isInternalPowerOn();
+                const bool holding = this->holdLeast && powerOn;
+                // The shaper held the output below the PID last time: do not let
+                // the integral build up against it.
+                this->adaptivePID->set_integral_frozen(this->shaper.limiting());
                 const float setPointCorrectionSimple = holding
                     ? this->adaptivePID->hold(currentTemperature, now)
-                    : this->adaptivePID->update(currentTemperature, now, deviceManager->isInternalPowerOn());
-                const float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);
-                ESP_LOGI(TAG, "PidWorkflowStep [Simple] setPointCorrection={%.2f} adjustedSetPoint={%.2f}%s kp={%.3f} ki={%.4f} kd={%.3f}",
+                    : this->adaptivePID->update(currentTemperature, now, powerOn);
+                float adjustedSetPointCorrectionSimple = devicestate::clamp(setPointCorrectionSimple, adjustedMinTemp, adjustedMaxTemp);
+                bool shaped = false;
+                if (this->shaper.enabled()) {
+                    if (holding) {
+                        this->shaper.reset();
+                    } else {
+                        const bool wasRunning = this->shaper.running();
+                        const devicestate::DeviceStatus status = deviceManager->getDeviceStatus();
+                        const float shapedValue = this->shaper.shape(adjustedSetPointCorrectionSimple,
+                            deviceManager->getOffsetDirection(), powerOn, powerOn && status.operating,
+                            status.currentTemperature, static_cast<uint32_t>(now));
+                        if (!wasRunning && this->shaper.running()) {
+                            if (std::isfinite(this->shaper.start_temperature())) {
+                                ESP_LOGI(TAG, "Device started seeing %.2f: setpoint held from there",
+                                    this->shaper.start_temperature());
+                            } else {
+                                ESP_LOGI(TAG, "Device started but reports no temperature: no run backoff");
+                            }
+                        }
+                        shaped = this->shaper.limiting();
+                        adjustedSetPointCorrectionSimple = devicestate::clamp(shapedValue, adjustedMinTemp, adjustedMaxTemp);
+                    }
+                }
+                ESP_LOGI(TAG, "PidWorkflowStep [Simple] setPointCorrection={%.2f} adjustedSetPoint={%.2f}%s%s kp={%.3f} ki={%.4f} kd={%.3f}",
                     setPointCorrectionSimple, adjustedSetPointCorrectionSimple, holding ? " (held at least output)" : "",
+                    shaped ? " (shaped)" : "",
                     this->adaptivePID->kp(), this->adaptivePID->ki(), this->adaptivePID->kd());
 
                 if (deviceManager->internalSetCorrectedTemperature(

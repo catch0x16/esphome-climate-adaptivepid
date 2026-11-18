@@ -46,7 +46,11 @@ public:
     // term, and with it the output, does not jump.
     void set_gains(float kp, float ki);
 
-    void set_deadband(float db);                      // small deadband near target (units same as measured)
+    void set_deadband(float db);
+
+    // While frozen, update() does not accumulate the integral: something
+    // downstream is holding the output below what the PID asks for.
+    void set_integral_frozen(bool frozen) { _integral_frozen = frozen; }                      // small deadband near target (units same as measured)
 
     // Logging: fills user-provided buffer (low-overhead)
     void log_state(char *buf, size_t buflen) const;
@@ -76,6 +80,7 @@ private:
     float _target;
     bool _heating;   // true: heating, false: cooling. Informational: the error sign already handles both.
     float _deadband;
+    bool _integral_frozen{false};
 
     // Helpers
     void clamp_integral();
