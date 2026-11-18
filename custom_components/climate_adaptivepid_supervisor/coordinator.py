@@ -61,8 +61,14 @@ def resolve_head(hass: HomeAssistant, climate_entity_id: str) -> HeadEntities:
                 operating = other.entity_id
         device = dr.async_get(hass).async_get(entry.device_id)
         if device is not None:
-            for config_entry_id in device.config_entries:
-                config_entry = hass.config_entries.async_get_entry(config_entry_id)
+            # A device belongs to one config entry (`config_entry_id`); older
+            # Home Assistant only has the `config_entries` set.
+            if hasattr(device, "config_entry_id"):
+                config_entry_ids = [device.config_entry_id]
+            else:
+                config_entry_ids = list(device.config_entries)
+            for config_entry_id in config_entry_ids:
+                config_entry = hass.config_entries.async_get_entry(config_entry_id) if config_entry_id else None
                 if config_entry is not None and config_entry.domain == "esphome":
                     node = config_entry.data.get("device_name")
     return HeadEntities(climate=climate_entity_id, operating=operating, node=node)
