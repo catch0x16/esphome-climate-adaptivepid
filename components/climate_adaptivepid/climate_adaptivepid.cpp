@@ -83,8 +83,12 @@ void ClimateAdaptivePID::refresh_traits_() {
   // The inner climate's traits, including its own visual overrides. This
   // climate's `visual:` settings are applied on top by get_traits().
   this->traits_ = this->inner_->get_traits();
-  this->set_supported_custom_fan_modes(this->traits_.get_supported_custom_fan_modes());
-  this->set_supported_custom_presets(this->traits_.get_supported_custom_presets());
+  // Copy the inner climate's custom lists onto this climate; Climate::get_traits()
+  // wires this entity's own lists into the traits it returns.
+  const auto &fan_modes = this->traits_.get_supported_custom_fan_modes();
+  this->set_supported_custom_fan_modes(std::vector<const char *>(fan_modes.begin(), fan_modes.end()));
+  const auto &presets = this->traits_.get_supported_custom_presets();
+  this->set_supported_custom_presets(std::vector<const char *>(presets.begin(), presets.end()));
   if (this->temperature_sensor_ != nullptr) {
     this->traits_.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
   }
