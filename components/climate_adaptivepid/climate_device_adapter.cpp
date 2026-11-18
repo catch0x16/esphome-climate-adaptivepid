@@ -8,9 +8,9 @@
 #include "floats.h"
 
 namespace esphome {
-namespace workflow_climate {
+namespace climate_adaptivepid {
 
-static const char *const TAG = "workflow_climate.device";
+static const char *const TAG = "climate_adaptivepid.device";
 
 void ClimateDeviceAdapter::set_limits(float min_temp, float max_temp, float step) {
   this->min_temp_ = min_temp;
@@ -241,5 +241,5 @@ void ClimateDeviceAdapter::sync_target() {
   }
 }
 
-}  // namespace workflow_climate
+}  // namespace climate_adaptivepid
 }  // namespace esphome

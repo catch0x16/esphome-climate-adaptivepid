@@ -1,5 +1,5 @@
 // Native test of the boot-time choice between learned and configured response rates:
-//   c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_store \
+//   c++ -std=c++17 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/test_tuning_store \
 //     tests/test_tuning_store.cpp && /tmp/test_tuning_store
 #include <cmath>
 #include <cstdio>
@@ -22,14 +22,14 @@ static bool near(float a, float b, float tolerance) { return std::fabs(a - b) <=
 
 static const float PER_HOUR = 1.0f / 3600.0f;
 
-// What one mode keeps in flash, as WorkflowClimate stores it.
+// What one mode keeps in flash, as ClimateAdaptivePID stores it.
 struct Slot {
   float rate{NAN};
   float seed{NAN};
 };
 
 // One boot: resolve against the configured seed, then record the seed in use
-// (WorkflowClimate saves at the end of load_tuning_).
+// (ClimateAdaptivePID saves at the end of load_tuning_).
 static Resolved boot(Slot &slot, float configured) {
   const Resolved resolved = workflow::pid::resolve(slot.rate, slot.seed, configured);
   slot.rate = resolved.value;

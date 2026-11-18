@@ -3,7 +3,7 @@
 **Status: proposed, not scheduled. Nothing here is implemented.**
 
 A design for a Home Assistant app and custom integration that coordinate the
-`workflow_climate` heads of one house: letting rooms drift to a low-power state
+`climate_adaptivepid` heads of one house: letting rooms drift to a low-power state
 when they are not in use, recovering them in time, switching mode in an
 emergency, and proposing changes to the schedules from observed use.
 
@@ -33,7 +33,7 @@ second bedroom) on **one shared outdoor unit**, a multi-split. So:
 - **Capacity:** the heads share the outdoor unit's capacity.
 - **Defrost and compressor starts** happen once, for all of them.
 
-Each head runs `workflow_climate` (this repo) on an ESP32 over the `cn105`
+Each head runs `climate_adaptivepid` (this repo) on an ESP32 over the `cn105`
 driver.
 
 **What the heads already do on their own** (Phases 0–2):
@@ -118,8 +118,8 @@ everything else reads it.
 
 | Value | Authoritative store | Changed by | How it's changed | Read by |
 |---|---|---|---|---|
-| Target, per mode | The head: workflow climate target (already stored per mode on the unit) | The user | HA climate card / `climate.set_temperature` | Head, integration → app |
-| Mode | The head: workflow climate mode | The user; the integration's emergency rule | `climate.set_hvac_mode` | Head, integration → app |
+| Target, per mode | The head: adaptive PID climate target (already stored per mode on the unit) | The user | HA climate card / `climate.set_temperature` | Head, integration → app |
+| Mode | The head: adaptive PID climate mode | The user; the integration's emergency rule | `climate.set_hvac_mode` | Head, integration → app |
 | Allowed drift heating / cooling | The head: two `number` entities, stored on the unit | The user | HA number entities | Head (clamps the offset), integration → app |
 | Comfort windows | Home Assistant: one `schedule` helper per room | The user | Settings → Devices & services → Helpers → Schedule | Integration → app (next start and end, read ahead) |
 | Supervisor control on/off, comfort-vs-savings slider | The integration's own entities (restored after restart) | The user | HA switch and number | Integration (gates commands), app |
@@ -206,7 +206,7 @@ Additions to this repo:
   - Websocket client and state forwarder.
   - The emergency rule.
   - Entities, repairs, diagnostics.
-- **`sim/`:** pybind11 bindings built straight from `components/workflow_climate/`
+- **`sim/`:** pybind11 bindings built straight from `components/climate_adaptivepid/`
   at the same commit.
   - Reuses `room_model.h`, `tuning_rule.h`, `tuning_store.h`,
     `adaptive_pid.*`, `floats.h` and `controller_types.h`.
@@ -221,7 +221,7 @@ Additions to this repo:
     registry. Registry credentials go in repo secrets, and the registry must be
     reachable from GitHub's runners; otherwise use a self-hosted runner.
 - **One version** is shared by `config.yaml`, `manifest.json` and a new
-  `WORKFLOW_CLIMATE_VERSION` constant in the component.
+  `CLIMATE_ADAPTIVEPID_VERSION` constant in the component.
 - **To check while implementing:**
   - The Home Assistant app store finds only `hvac_supervisor/config.yaml`, not
     the ESPHome YAML fixtures.
@@ -229,7 +229,7 @@ Additions to this repo:
 
 ## Phase 4a: Read-only data pipeline
 
-- **Config flow:** pick the three workflow climates (one outdoor-unit group).
+- **Config flow:** pick the three adaptive PID climates (one outdoor-unit group).
   For each room, pick:
   - its comfort schedule helper,
   - its activity signals (suggested from the room's Home Assistant areas:
@@ -270,7 +270,7 @@ Additions to this repo:
   - Cost = time outside target + outdoor-unit starts + runtime.
   - Results are proposed (4c) as YAML snippets with the simulated
     before/after; the user applies them by editing YAML and flashing.
-- **Version check:** `WORKFLOW_CLIMATE_VERSION` is published as a diagnostic
+- **Version check:** `CLIMATE_ADAPTIVEPID_VERSION` is published as a diagnostic
   text sensor on each head. The integration raises a repair if it differs
   from the simulator's.
 
@@ -341,7 +341,7 @@ help set up the schedules before drift control starts.
 
 ## Phase 5a: Firmware for drift (nothing active yet)
 
-**Component** (`components/workflow_climate/`):
+**Component** (`components/climate_adaptivepid/`):
 
 - **Allowed drift:** `Allowed drift heating` and `Allowed drift cooling`
   `number` entities (0–2 °C, step 0.25, default 0), configured in a new
@@ -419,7 +419,7 @@ control, then delete the automation. Drift values are in °C on the heads.
   - at most one switch every 6 hours,
   - a persistent notification and a logbook entry with the reason,
   - `switch.hvac_supervisor_emergency_mode` to disable it.
-- **Writes:** `climate.set_hvac_mode` on the three workflow climates. The
+- **Writes:** `climate.set_hvac_mode` on the three adaptive PID climates. The
   existing mode automation is then deleted.
 
 ## Rollout

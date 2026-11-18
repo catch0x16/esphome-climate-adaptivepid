@@ -10,7 +10,7 @@
 #include "power_tracker.h"
 
 namespace esphome {
-namespace workflow_climate {
+namespace climate_adaptivepid {
 
 // Presents any single-target climate::Climate to the controller steps as an
 // IDeviceStateManager. Owns everything about the *device-facing* state: the
@@ -108,5 +108,5 @@ class ClimateDeviceAdapter : public devicestate::IDeviceStateManager {
   uint32_t last_power_change_ms_{0};
 };
 
-}  // namespace workflow_climate
+}  // namespace climate_adaptivepid
 }  // namespace esphome

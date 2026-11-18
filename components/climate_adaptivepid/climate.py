@@ -60,9 +60,9 @@ CONF_HEAT_LOSS = "heat_loss"
 CONF_DEAD_TIME_HEATING = "dead_time_heating"
 CONF_DEAD_TIME_COOLING = "dead_time_cooling"
 
-workflow_climate_ns = cg.esphome_ns.namespace("workflow_climate")
-WorkflowClimate = workflow_climate_ns.class_(
-    "WorkflowClimate", climate.Climate, cg.Component
+climate_adaptivepid_ns = cg.esphome_ns.namespace("climate_adaptivepid")
+ClimateAdaptivePID = climate_adaptivepid_ns.class_(
+    "ClimateAdaptivePID", climate.Climate, cg.Component
 )
 
 PID_SCHEMA = cv.Schema(
@@ -163,7 +163,7 @@ def _power_sensor_schema(device_class):
 # Diagnostic entities are created by default. The names match the entities the
 # integrated mitsubishi_heatpump component used to publish.
 CONFIG_SCHEMA = cv.All(
-    climate.climate_schema(WorkflowClimate)
+    climate.climate_schema(ClimateAdaptivePID)
     .extend(
         {
             cv.Required(CONF_CLIMATE_ID): cv.use_id(climate.Climate),

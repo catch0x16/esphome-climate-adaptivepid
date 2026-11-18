@@ -46,7 +46,7 @@ sensor:
     lambda: return 5.0;
 
 climate:
-  - platform: workflow_climate
+  - platform: climate_adaptivepid
     id: test_heatpump
     name: "Test Heatpump"
     climate_id: inner_climate

@@ -1,9 +1,9 @@
 // Replays recorded Home Assistant history through the room model the units run
-// (components/workflow_climate/room_model.h), to see what a unit would learn
+// (components/climate_adaptivepid/room_model.h), to see what a unit would learn
 // from it and whether the output estimate holds up.
 //
 // Build:
-//   c++ -std=c++17 -O2 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/replay tools/room_model/replay.cpp
+//   c++ -std=c++17 -O2 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/replay tools/room_model/replay.cpp
 //
 // Input: a CSV downloaded from Home Assistant's History panel ("Download data")
 // with these entities in it, columns entity_id,state,last_changed:

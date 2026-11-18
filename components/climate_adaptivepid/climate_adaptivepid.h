@@ -16,7 +16,7 @@
 #include "tuning_store.h"
 
 namespace esphome {
-namespace workflow_climate {
+namespace climate_adaptivepid {
 
 // User-facing climate that wraps another ("inner") climate and runs hysteresis
 // and PID workflows on top of it.
@@ -26,7 +26,7 @@ namespace workflow_climate {
 // while the outer climate still reads HEAT, and its setpoint is the PID's
 // corrected value rather than the user's target. In every other mode, and for
 // fan, swing, presets and humidity, the outer climate is a plain pass-through.
-class WorkflowClimate : public Component, public climate::Climate {
+class ClimateAdaptivePID : public Component, public climate::Climate {
  public:
   void set_inner_climate(climate::Climate *inner);
   void set_temperature_sensor(sensor::Sensor *sensor);
@@ -226,5 +226,5 @@ class WorkflowClimate : public Component, public climate::Climate {
   uint32_t last_workflow_run_{0};
 };
 
-}  // namespace workflow_climate
+}  // namespace climate_adaptivepid
 }  // namespace esphome

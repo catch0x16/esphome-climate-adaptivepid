@@ -1,5 +1,5 @@
 // Native test of setpoint rounding to the device step. No ESPHome needed:
-//   c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_round_to_step \
+//   c++ -std=c++17 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/test_round_to_step \
 //     tests/test_round_to_step.cpp && /tmp/test_round_to_step
 #include <cmath>
 #include <cstdio>

@@ -1,6 +1,6 @@
 // Native test of the PID controller. No ESPHome needed:
-//   c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_adaptive_pid \
-//     tests/test_adaptive_pid.cpp components/workflow_climate/adaptive_pid.cpp && /tmp/test_adaptive_pid
+//   c++ -std=c++17 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/test_adaptive_pid \
+//     tests/test_adaptive_pid.cpp components/climate_adaptivepid/adaptive_pid.cpp && /tmp/test_adaptive_pid
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>

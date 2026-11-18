@@ -32,7 +32,7 @@ sensor:
     lambda: return 21.0;
 
 climate:
-  # The device driver. Hidden: the workflow climate is the only one exposed.
+  # The device driver. Hidden: the adaptive PID climate is the only one exposed.
   - platform: cn105
     id: hp
     name: "Heat pump device"
@@ -56,7 +56,7 @@ climate:
     outside_air_temperature_sensor:
       name: "Outside temperature"
 
-  - platform: workflow_climate
+  - platform: climate_adaptivepid
     name: "HVAC"
     climate_id: hp
     temperature_sensor: room_temperature

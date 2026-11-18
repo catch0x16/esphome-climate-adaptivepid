@@ -1,8 +1,8 @@
 # End-to-end scenario on the host platform. Short timings so it finishes in
 # about a minute; the log shows the outer climate against the inner one.
 #
-#   esphome compile tests/fixtures/scenario.yaml
-#   .esphome/build/workflow-scenario/.pioenvs/workflow-scenario/program
+#   uv run --locked esphome compile tests/fixtures/scenario.yaml
+#   tests/fixtures/.esphome/build/workflow-scenario/.pioenvs/workflow-scenario/program
 esphome:
   name: workflow-scenario
   on_boot:
@@ -86,7 +86,7 @@ sensor:
     lambda: return id(room);
 
 climate:
-  - platform: workflow_climate
+  - platform: climate_adaptivepid
     id: outer
     name: "Outer climate"
     climate_id: inner_climate

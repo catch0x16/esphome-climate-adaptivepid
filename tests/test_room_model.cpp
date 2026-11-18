@@ -1,5 +1,5 @@
 // Native test of the online room model against a simulated room:
-//   c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_room_model \
+//   c++ -std=c++17 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/test_room_model \
 //     tests/test_room_model.cpp && /tmp/test_room_model
 //
 // The simulated room follows the model's own equation with known values, a

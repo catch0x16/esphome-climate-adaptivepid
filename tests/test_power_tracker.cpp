@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "../components/workflow_climate/power_tracker.h"
+#include "../components/climate_adaptivepid/power_tracker.h"
 
 using workflow::PowerEvent;
 using workflow::PowerTracker;

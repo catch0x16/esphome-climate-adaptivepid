@@ -1,6 +1,6 @@
-# ESPHome Workflow Climate
+# ESPHome Adaptive PID Climate
 
-`workflow_climate` is a climate that wraps another ESPHome climate and runs a
+`climate_adaptivepid` is a climate that wraps another ESPHome climate and runs a
 PID controller and a hysteresis (on/off) controller on top of it, entirely on
 the device.
 
@@ -20,7 +20,7 @@ single-target climate. It was written for Mitsubishi heat pumps driven by
 ```yaml
 external_components:
   - source: github://catch0x16/esphome-mitsubishiheatpump
-    components: [workflow_climate]
+    components: [climate_adaptivepid]
   - source: github://echavet/MitsubishiCN105ESPHome
     components: [cn105]
 
@@ -31,7 +31,7 @@ uart:
   rx_pin: 16
 
 climate:
-  # The device driver. Hidden, so Home Assistant only sees the workflow climate.
+  # The device driver. Hidden, so Home Assistant only sees the adaptive PID climate.
   - platform: cn105
     id: hp
     name: "Heat pump device"
@@ -44,7 +44,7 @@ climate:
       mode: [COOL, HEAT, FAN_ONLY, DRY]
       # dual_setpoint must stay off (the default)
 
-  - platform: workflow_climate
+  - platform: climate_adaptivepid
     name: "HVAC"
     climate_id: hp
     temperature_sensor: room_temperature
@@ -254,50 +254,28 @@ the device's state.
 
 ## Development
 
-Requires ESPHome 2026.8.1 or newer.
+Install `uv` and a C++17 compiler. From the repository root, `uv run --locked`
+sets up the project environment with ESPHome 2026.10.2 and the dependencies in
+`uv.lock`.
 
 ```bash
-# Power tracking rules, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -o /tmp/test_power_tracker tests/test_power_tracker.cpp && /tmp/test_power_tracker
-
-# PID controller, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_adaptive_pid \
-  tests/test_adaptive_pid.cpp components/workflow_climate/adaptive_pid.cpp && /tmp/test_adaptive_pid
-
-# Hysteresis off delay and limit, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_off_gate \
-  tests/test_off_gate.cpp && /tmp/test_off_gate
-
-# Setpoint rounding to the device step, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_round_to_step \
-  tests/test_round_to_step.cpp && /tmp/test_round_to_step
-
-# Tuning rule, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_rule \
-  tests/test_tuning_rule.cpp && /tmp/test_tuning_rule
-
-# Room model against a simulated room, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_room_model \
-  tests/test_room_model.cpp && /tmp/test_room_model
-
-# Learned-versus-configured choice at boot, no ESPHome needed
-c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_store \
-  tests/test_tuning_store.cpp && /tmp/test_tuning_store
+# Run all standalone C++ tests
+uv run --locked python tests/run_native.py
 
 # Host build against the demo climate
-esphome compile test.yaml
+uv run --locked esphome compile test.yaml
 
-# End-to-end scenario (about a minute; watch the log)
-esphome compile tests/fixtures/scenario.yaml
+# Run the end-to-end scenario on the host (about a minute; watch the log)
+uv run --locked esphome compile tests/fixtures/scenario.yaml
 tests/fixtures/.esphome/build/workflow-scenario/.pioenvs/workflow-scenario/program
 
 # Compile check against the upstream CN105 driver
-esphome compile tests/fixtures/cn105.yaml
+uv run --locked esphome compile tests/fixtures/cn105.yaml
 ```
 
-Layout of `components/workflow_climate/`:
+Layout of `components/climate_adaptivepid/`:
 
-- `workflow_climate.*`: the outer climate.
+- `climate_adaptivepid.*`: the outer climate.
 - `climate_device_adapter.*`: presents the inner climate to the controller.
 - `power_tracker.h`: commanded versus reported power; no ESPHome dependency.
 - `hysterisis_workflowstep.*`, `pid_workflowstep.*`, `adaptive_pid.*`: the controller.

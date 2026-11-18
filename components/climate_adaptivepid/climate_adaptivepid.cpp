@@ -1,4 +1,4 @@
-#include "workflow_climate.h"
+#include "climate_adaptivepid.h"
 
 #include <algorithm>
 #include <new>
@@ -10,9 +10,9 @@
 #include "pid_workflowstep.h"
 
 namespace esphome {
-namespace workflow_climate {
+namespace climate_adaptivepid {
 
-static const char *const TAG = "workflow_climate";
+static const char *const TAG = "climate_adaptivepid";
 
 using workflow::PowerEvent;
 
@@ -37,12 +37,12 @@ static void publish_value(sensor::Sensor *sensor, float value) {
   }
 }
 
-void WorkflowClimate::set_inner_climate(climate::Climate *inner) {
+void ClimateAdaptivePID::set_inner_climate(climate::Climate *inner) {
   this->inner_ = inner;
   inner->add_on_state_callback([this](climate::Climate &) { this->on_inner_state_(); });
 }
 
-void WorkflowClimate::set_temperature_sensor(sensor::Sensor *sensor) {
+void ClimateAdaptivePID::set_temperature_sensor(sensor::Sensor *sensor) {
   this->temperature_sensor_ = sensor;
   sensor->add_on_state_callback([this](float) {
     if (this->initialized_ && assign_float(this->current_temperature, this->room_temperature_())) {
@@ -51,7 +51,7 @@ void WorkflowClimate::set_temperature_sensor(sensor::Sensor *sensor) {
   });
 }
 
-float WorkflowClimate::room_temperature_() const {
+float ClimateAdaptivePID::room_temperature_() const {
   if (this->temperature_sensor_ != nullptr && this->temperature_sensor_->has_state() &&
       std::isfinite(this->temperature_sensor_->state)) {
     return this->temperature_sensor_->state;
@@ -59,7 +59,7 @@ float WorkflowClimate::room_temperature_() const {
   return this->inner_->current_temperature;
 }
 
-float WorkflowClimate::effective_min_temperature_() const {
+float ClimateAdaptivePID::effective_min_temperature_() const {
   float value = this->traits_.get_visual_min_temperature();
 #ifdef USE_CLIMATE_VISUAL_OVERRIDES
   if (std::isfinite(this->visual_min_temperature_override_)) {
@@ -69,7 +69,7 @@ float WorkflowClimate::effective_min_temperature_() const {
   return value;
 }
 
-float WorkflowClimate::effective_max_temperature_() const {
+float ClimateAdaptivePID::effective_max_temperature_() const {
   float value = this->traits_.get_visual_max_temperature();
 #ifdef USE_CLIMATE_VISUAL_OVERRIDES
   if (std::isfinite(this->visual_max_temperature_override_)) {
@@ -79,7 +79,7 @@ float WorkflowClimate::effective_max_temperature_() const {
   return value;
 }
 
-void WorkflowClimate::refresh_traits_() {
+void ClimateAdaptivePID::refresh_traits_() {
   // The inner climate's traits, including its own visual overrides. This
   // climate's `visual:` settings are applied on top by get_traits().
   this->traits_ = this->inner_->get_traits();
@@ -92,11 +92,11 @@ void WorkflowClimate::refresh_traits_() {
                            this->traits_.get_visual_target_temperature_step());
 }
 
-float WorkflowClimate::stored_target_(climate::ClimateMode mode) const {
+float ClimateAdaptivePID::stored_target_(climate::ClimateMode mode) const {
   return mode == climate::CLIMATE_MODE_COOL ? this->stored_targets_.cool : this->stored_targets_.heat;
 }
 
-void WorkflowClimate::store_target_(climate::ClimateMode mode, float value) {
+void ClimateAdaptivePID::store_target_(climate::ClimateMode mode, float value) {
   float &slot = mode == climate::CLIMATE_MODE_COOL ? this->stored_targets_.cool : this->stored_targets_.heat;
   if (slot == value) {
     return;
@@ -105,7 +105,7 @@ void WorkflowClimate::store_target_(climate::ClimateMode mode, float value) {
   this->targets_preference_.save(&this->stored_targets_);
 }
 
-void WorkflowClimate::load_targets_() {
+void ClimateAdaptivePID::load_targets_() {
   StoredTargets loaded{};
   if (this->targets_preference_.load(&loaded) && loaded.version == TARGETS_VERSION &&
       std::isfinite(loaded.heat) && std::isfinite(loaded.cool)) {
@@ -119,7 +119,7 @@ void WorkflowClimate::load_targets_() {
 // Per hour for logs and sensors, from per second.
 static float per_hour(float per_second) { return per_second * 3600.0f; }
 
-void WorkflowClimate::load_tuning_() {
+void ClimateAdaptivePID::load_tuning_() {
   if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
     return;
   }
@@ -188,7 +188,7 @@ void WorkflowClimate::load_tuning_() {
   this->save_tuning_(millis(), true);
 }
 
-void WorkflowClimate::log_model_(const char *prefix) const {
+void ClimateAdaptivePID::log_model_(const char *prefix) const {
   using workflow::pid::tuning_source_to_string;
   const workflow::pid::ModelState &m = this->pid_step_->modelState();
   ESP_LOGI(TAG, "%s: heating %.2f C/h (%s), cooling %.2f C/h (%s), heat loss %.3f /h (%s)", prefix,
@@ -205,7 +205,7 @@ static bool same_model(const workflow::pid::ModelState &a, const workflow::pid::
          a.heat_dead_s == b.heat_dead_s && a.cool_dead_s == b.cool_dead_s;
 }
 
-void WorkflowClimate::save_tuning_(uint32_t now, bool force) {
+void ClimateAdaptivePID::save_tuning_(uint32_t now, bool force) {
   if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
     return;
   }
@@ -221,12 +221,12 @@ void WorkflowClimate::save_tuning_(uint32_t now, bool force) {
   this->last_tuning_save_ = now;
 }
 
-void WorkflowClimate::on_safe_shutdown() {
+void ClimateAdaptivePID::on_safe_shutdown() {
   // Runs before the preferences are synced to flash on an OTA or safe reboot.
   this->save_tuning_(millis(), true);
 }
 
-void WorkflowClimate::reset_tuning() {
+void ClimateAdaptivePID::reset_tuning() {
   if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
     ESP_LOGW(TAG, "reset_tuning: adaptive PID tuning is not enabled");
     return;
@@ -238,7 +238,7 @@ void WorkflowClimate::reset_tuning() {
   this->publish_diagnostics_();
 }
 
-void WorkflowClimate::warn_if_off_step_(const char *name, float value) {
+void ClimateAdaptivePID::warn_if_off_step_(const char *name, float value) {
   const float step = this->traits_.get_visual_target_temperature_step();
   if (step <= 0.0f) {
     return;
@@ -252,7 +252,7 @@ void WorkflowClimate::warn_if_off_step_(const char *name, float value) {
   }
 }
 
-void WorkflowClimate::setup() {
+void ClimateAdaptivePID::setup() {
   if (this->inner_ == nullptr) {
     ESP_LOGE(TAG, "No inner climate configured");
     this->mark_failed();
@@ -311,7 +311,7 @@ void WorkflowClimate::setup() {
   }
 }
 
-bool WorkflowClimate::inner_ready_() const {
+bool ClimateAdaptivePID::inner_ready_() const {
   if (this->ready_sensor_ != nullptr && !(this->ready_sensor_->has_state() && this->ready_sensor_->state)) {
     return false;
   }
@@ -322,7 +322,7 @@ bool WorkflowClimate::inner_ready_() const {
   return !this->mode_uses_target_(this->inner_->mode) || std::isfinite(this->inner_->target_temperature);
 }
 
-void WorkflowClimate::initialize_from_inner_() {
+void ClimateAdaptivePID::initialize_from_inner_() {
   const uint32_t now = millis();
   // The inner climate may only have finished describing itself during its own setup.
   this->refresh_traits_();
@@ -382,7 +382,7 @@ void WorkflowClimate::initialize_from_inner_() {
   this->publish_diagnostics_();
 }
 
-bool WorkflowClimate::copy_passthrough_state_() {
+bool ClimateAdaptivePID::copy_passthrough_state_() {
   bool changed = false;
 
   if (this->action != this->inner_->action) {
@@ -428,7 +428,7 @@ bool WorkflowClimate::copy_passthrough_state_() {
   return changed;
 }
 
-void WorkflowClimate::on_inner_state_() {
+void ClimateAdaptivePID::on_inner_state_() {
   if (!this->compatible_) {
     return;
   }
@@ -445,7 +445,7 @@ void WorkflowClimate::on_inner_state_() {
   this->publish_diagnostics_();
 }
 
-void WorkflowClimate::adopt_inner_mode_(const char *reason) {
+void ClimateAdaptivePID::adopt_inner_mode_(const char *reason) {
   ESP_LOGI(TAG, "%s: following the device to %s", reason,
            LOG_STR_ARG(climate::climate_mode_to_string(this->inner_->mode)));
   this->mode = this->inner_->mode;
@@ -459,7 +459,7 @@ void WorkflowClimate::adopt_inner_mode_(const char *reason) {
   this->publish_state();
 }
 
-void WorkflowClimate::handle_power_event_(PowerEvent event, uint32_t now) {
+void ClimateAdaptivePID::handle_power_event_(PowerEvent event, uint32_t now) {
   switch (event) {
     case PowerEvent::EXTERNAL_OFF:
       ESP_LOGI(TAG, "Device was switched off externally: turning off");
@@ -488,7 +488,7 @@ void WorkflowClimate::handle_power_event_(PowerEvent event, uint32_t now) {
   this->publish_diagnostics_();
 }
 
-void WorkflowClimate::run_workflows_() {
+void ClimateAdaptivePID::run_workflows_() {
   if (!this->is_workflow_mode_()) {
     return;
   }
@@ -513,7 +513,7 @@ void WorkflowClimate::run_workflows_() {
   this->publish_diagnostics_();
 }
 
-void WorkflowClimate::loop() {
+void ClimateAdaptivePID::loop() {
   if (!this->compatible_) {
     return;
   }
@@ -545,7 +545,7 @@ void WorkflowClimate::loop() {
   }
 }
 
-void WorkflowClimate::control(const climate::ClimateCall &call) {
+void ClimateAdaptivePID::control(const climate::ClimateCall &call) {
   if (!this->initialized_) {
     ESP_LOGW(TAG, "Ignoring control: the inner climate has not reported its state yet");
     return;
@@ -635,7 +635,7 @@ void WorkflowClimate::control(const climate::ClimateCall &call) {
   this->publish_diagnostics_();
 }
 
-void WorkflowClimate::publish_diagnostics_() {
+void ClimateAdaptivePID::publish_diagnostics_() {
   if (!this->initialized_) {
     return;
   }
@@ -657,8 +657,8 @@ void WorkflowClimate::publish_diagnostics_() {
   }
 }
 
-void WorkflowClimate::dump_config() {
-  LOG_CLIMATE("", "Workflow Climate", this);
+void ClimateAdaptivePID::dump_config() {
+  LOG_CLIMATE("", "Adaptive PID Climate", this);
   ESP_LOGCONFIG(TAG, "  Update interval: %u ms", static_cast<unsigned>(this->update_interval_));
   ESP_LOGCONFIG(TAG, "  Settle time: %u ms", static_cast<unsigned>(this->settle_ms_));
   ESP_LOGCONFIG(TAG, "  Room temperature: %s", this->temperature_sensor_ != nullptr ? "sensor" : "inner climate");
@@ -709,5 +709,5 @@ void WorkflowClimate::dump_config() {
   }
 }
 
-}  // namespace workflow_climate
+}  // namespace climate_adaptivepid
 }  // namespace esphome

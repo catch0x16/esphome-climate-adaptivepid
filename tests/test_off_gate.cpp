@@ -1,5 +1,5 @@
 // Native test of the hysteresis off gate. No ESPHome needed:
-//   c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_off_gate \
+//   c++ -std=c++17 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/test_off_gate \
 //     tests/test_off_gate.cpp && /tmp/test_off_gate
 #include <cmath>
 #include <cstdio>

@@ -1,5 +1,5 @@
 // Native test of the tuning rule:
-//   c++ -std=c++17 -Wall -Wextra -Icomponents/workflow_climate -o /tmp/test_tuning_rule \
+//   c++ -std=c++17 -Wall -Wextra -Icomponents/climate_adaptivepid -o /tmp/test_tuning_rule \
 //     tests/test_tuning_rule.cpp && /tmp/test_tuning_rule
 #include <cmath>
 #include <cstdio>
