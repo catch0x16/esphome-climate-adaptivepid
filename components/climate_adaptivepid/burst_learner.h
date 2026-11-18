@@ -15,8 +15,6 @@
 // - Coast: the peak minus the room when the run stopped, and how long after
 //   the stop the peak came. Predicts the peak while running (early stop), and
 //   is the window in which a rising room is the head's own heat, not shared.
-// - Leak rate: how fast the room moves while the head is idle and heat arrives
-//   from other heads. Sets how early to park.
 //
 // Gain and coast are kept apart for runs alone and runs while other heads
 // also ran (shared), since a shared outdoor unit keeps delivering after this
@@ -29,9 +27,7 @@ struct BurstState {
   float gain[2];      // C, [0] alone, [1] shared
   float coast[2];     // C
   float coast_time_s;
-  float leak_per_min;  // C/min
   uint32_t gain_count[2];
-  uint32_t leak_count;
 };
 
 class BurstLearner {
@@ -40,8 +36,6 @@ class BurstLearner {
   // A coast ends once the room has moved back this far from its peak.
   static constexpr float COAST_END = 0.1f;
   static constexpr uint32_t MAX_COAST_MS = 15 * 60 * 1000;
-  // Leak episodes shorter than this teach nothing.
-  static constexpr uint32_t MIN_LEAK_MS = 2 * 60 * 1000;
   // Defaults while nothing is learned.
   static constexpr float DEFAULT_COAST_ALONE = 0.3f;
   static constexpr float DEFAULT_COAST_SHARED = 0.6f;
@@ -52,9 +46,8 @@ class BurstLearner {
   BurstLearner() { this->reset(); }
 
   void reset() {
-    this->state_ = BurstState{{NAN, NAN}, {NAN, NAN}, NAN, NAN, {0, 0}, 0};
+    this->state_ = BurstState{{NAN, NAN}, {NAN, NAN}, NAN, {0, 0}};
     this->phase_ = Phase::NONE;
-    this->leaking_ = false;
   }
   void set_state(const BurstState &state) { this->state_ = state; }
   const BurstState &state() const { return this->state_; }
@@ -67,7 +60,6 @@ class BurstLearner {
     if (heating != this->heating_) {
       this->heating_ = heating;
       this->phase_ = Phase::NONE;
-      this->leaking_ = false;
     }
     const bool running = state == HeadState::START || state == HeadState::RUN;
 
@@ -116,30 +108,6 @@ class BurstLearner {
       this->shared_ = shared;
     }
 
-    // Leak episodes: idle, powered, shared heat, outside the head's own coast.
-    const bool leak_now = state == HeadState::IDLE && powered && shared && this->phase_ == Phase::NONE &&
-                          std::isfinite(room);
-    if (leak_now && !this->leaking_) {
-      this->leaking_ = true;
-      this->leak_start_ms_ = now_ms;
-      this->leak_start_room_ = room;
-      this->leak_last_room_ = room;
-      this->leak_last_ms_ = now_ms;
-    } else if (leak_now) {
-      this->leak_last_room_ = room;
-      this->leak_last_ms_ = now_ms;
-    } else if (this->leaking_) {
-      this->leaking_ = false;
-      const uint32_t span = this->leak_last_ms_ - this->leak_start_ms_;
-      if (span >= MIN_LEAK_MS) {
-        const float rate = sign * (this->leak_last_room_ - this->leak_start_room_) / (span / 60000.0f);
-        if (rate > 0.0f) {
-          smooth_(this->state_.leak_per_min, rate);
-          this->state_.leak_count++;
-          learned = true;
-        }
-      }
-    }
     return learned;
   }
 
@@ -166,8 +134,6 @@ class BurstLearner {
   float gain_alone() const {
     return this->state_.gain_count[0] >= MIN_RUNS ? this->state_.gain[0] : NAN;
   }
-  // Learned leak rate, C/min; NaN until enough episodes.
-  float leak_per_min() const { return this->state_.leak_count >= 2 ? this->state_.leak_per_min : NAN; }
 
  private:
   enum class Phase : uint8_t { NONE, RUNNING, COASTING };
@@ -204,12 +170,6 @@ class BurstLearner {
   float stop_room_{NAN};
   float peak_room_{NAN};
   uint32_t peak_ms_{0};
-
-  bool leaking_{false};
-  uint32_t leak_start_ms_{0};
-  float leak_start_room_{NAN};
-  uint32_t leak_last_ms_{0};
-  float leak_last_room_{NAN};
 };
 
 }  // namespace start

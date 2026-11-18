@@ -4,7 +4,7 @@
 - **Release 1, coordination: implemented.** It is the `climate_adaptivepid_supervisor` Home Assistant integration, with no app. See [Release 1: coordination](#release-1-coordination-implemented).
 - **Everything after that: proposed, not scheduled.** That covers drift and recovery, the house model, proposals, and the emergency mode switch.
 
-The supervisor coordinates the `climate_adaptivepid` heads of one house that share an outdoor unit. The first need was coordination: telling a head when heat is leaking in from the others, and when to park. That needs no model, so it lives in a custom integration that reacts to state changes. The later goals are letting rooms drift to a low-power state when not in use, recovering them in time, switching mode in an emergency, and proposing schedule changes from observed use. They extend the integration first; an app (below) is only worth adding if modelling outgrows it.
+The supervisor coordinates the `climate_adaptivepid` heads of one house that share an outdoor unit. The first need was coordination: telling a head, for certain, when heat is leaking in from the others. The head decides what to do with it (no runs of its own, and parking at its hysteresis `off_threshold`). That needs no model, so it lives in a custom integration that reacts to state changes. The later goals are letting rooms drift to a low-power state when not in use, recovering them in time, switching mode in an emergency, and proposing schedule changes from observed use. They extend the integration first; an app (below) is only worth adding if modelling outgrows it.
 
 The measurements behind the coordination are in [research/shared-outdoor-unit.md](research/shared-outdoor-unit.md), and the head-side behaviour is in [start-control-design.md](start-control-design.md).
 
@@ -32,48 +32,47 @@ The measurements behind the coordination are in [research/shared-outdoor-unit.md
 
 **Config flow.**
 - **Pick the heads on one outdoor unit:** their adaptive PID climates, at least two.
-- **Pick the rooms that receive hints:** they need `start_control` and the two ESPHome actions below.
-- **Set the park margin.**
+- **Pick the rooms that receive hints:** they need `start_control` and the ESPHome action below.
 
 For each head, the integration finds its `Operating` binary sensor and its ESPHome node name (from the head's ESPHome config entry) through the device registry.
 
 **Decisions** (`logic.py`, pure Python, tested without Home Assistant). For each hinted room:
 
-| Other heads | Room vs target | Hints sent |
-|---|---|---|
-| None operating | — | `shared_heat` off; no park request (an earlier one expires) |
-| Any operating | within `park_margin` of target, or past it | `shared_heat` on, `request_park` park |
-| Any operating | further below target than that | `shared_heat` on, `request_park` unpark (take the leak instead of starting a run) |
+| Other heads | Hint sent |
+|---|---|
+| None operating | `shared_heat` off |
+| Any operating | `shared_heat` on |
+
+Park and unpark requests were removed in 0.2.0: the head parks on its own hysteresis band (see [start-control-design.md](start-control-design.md#transitions)), so the supervisor no longer needs a margin of its own. A `park_margin` saved by 0.1 is ignored.
 
 A room's own run never counts as shared heat for that room. Rooms in modes other than heat or cool get no hints.
 
 **Sending** (`coordinator.py`):
 - **When:** on any change of the heads' climate or `Operating` states, and renewed every 60 s.
-- **Expiry:** hints are valid for 120 s (`shared_heat`) and 180 s (`request_park`), so a stopped supervisor leaves the heads alone within 3 minutes.
-- **Calls:** `esphome.<node>_shared_heat` and `esphome.<node>_request_park`.
+- **Expiry:** the hint is valid for 120 s, so a stopped supervisor leaves the heads alone within 2 minutes.
+- **Calls:** `esphome.<node>_shared_heat`.
 - **Failures:** a failed call (head offline) is logged and skipped; the other heads are unaffected.
 - **Logbook:** every change of hints is written to the logbook against the room's climate.
 
-**Head side.** The device YAML defines the two actions, calling the climate's `set_shared_heat_hint(active, valid_for_s)` and `request_park(park, valid_for_s)`. Without hints, each head's local detector and thresholds decide (see [start-control-design.md](start-control-design.md#independence)).
+**Head side.** The device YAML defines the action, calling the climate's `set_shared_heat_hint(active, valid_for_s)`. Without the hint, each head's local detector decides (see [start-control-design.md](start-control-design.md#independence)).
 
 **Entities:**
 - `switch.<name>_supervisor_enabled` (restored across restarts): while off, nothing is sent.
 - `binary_sensor.<name>_outdoor_unit_running`: diagnostic, any head operating.
 - Per hinted room:
   - `binary_sensor.<name>_<room>_shared_heat`: other heads only.
-  - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat`, `park`, `unpark` or `disabled`, with the reason as an attribute.
+  - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat` or `disabled`, with the reason as an attribute.
 
 **Tests** (`tests/supervisor/`, run with `pytest-homeassistant-custom-component` in an isolated environment, see the README):
 - **The decision rules.**
 - **The hint lifecycle:** sent when another head starts, renewed, cleared when it stops, never for the room's own run.
-- **Park within the margin and unpark below it.**
 - **The disable switch.**
 - **A head offline.**
 - **The config flow.**
 
 **Next steps for the integration**, before any app:
 - **Hold off overshoot:** delay another head's run with a small low-power offset (5a's `apply_offset`) while a hinted room is near the top of its band.
-- **Group heating:** with planned recovery (5b), unpark a room during another head's run before it needs one of its own.
+- **Group heating:** with planned recovery (5b), switch a parked room on during another head's run before it needs one of its own.
 - **Emergency mode switch (5d).**
 
 ## Context

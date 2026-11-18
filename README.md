@@ -72,7 +72,7 @@ climate:
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
 | `outdoor_temperature_sensor` | none | Outdoor temperature for the room model's heat loss. Without it heat loss is not learned and is left out of the heating and cooling rates. |
 | `humidity_sensor` | none | Room humidity. With start control it confirms heat arriving from other heads on a shared outdoor unit (warm supply air dries the room). |
-| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`, `start_threshold`, `park_when_shared`, `park_margin`; see [Start control](#start-control). |
+| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`, `start_threshold`; see [Start control](#start-control). |
 | `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. With `off_delay` (default `0s`) a room past `off_threshold` is first held: the PID is pulled to its least output (target minus `max_adjustment_under` while heating) with its integral frozen, and the device is switched off only if the room is still past the threshold after `off_delay`, or at once past `off_limit` (default `off_threshold` + 0.5). Room sensors near the unit read past the target for a few minutes after each run; the delay keeps those brief peaks from forcing a full power-on start. |
 
 At least one of `pid` and `hysteresis` is required. The standard climate
@@ -89,9 +89,8 @@ or reconfigured under its key (`internal_power`, `device_power`, `operating`,
 `device_current_temperature`, `device_set_point`, `pid_set_point`, `pid_kp`,
 `pid_ki`, `heating_rate`, `cooling_rate`, `heat_loss`, `dead_time_heating`,
 `dead_time_cooling`). With start control there are also `Control state`
-(0 IDLE, 1 START, 2 RUN, 3 PARKED), `Start threshold`, `Leak rate` and
-`Shared heat` (`control_state`, `start_threshold_sensor`, `leak_rate`,
-`shared_heat`). Anything device-specific, such as
+(0 IDLE, 1 START, 2 RUN, 3 PARKED), `Start threshold` and `Shared heat`
+(`control_state`, `start_threshold_sensor`, `shared_heat`). Anything device-specific, such as
 compressor frequency or energy, comes from the inner climate's own sensors.
 
 ### PID gains
@@ -150,24 +149,32 @@ sends one of three setpoints relative to the unit's view:
 | IDLE | view − 1.0 | after every stop; the unit stays off |
 | START | view | the PID's demand reaches `start_threshold`, no heat is arriving from other heads, and the room isn't still rising |
 | RUN | view at start − 0.5 | the unit reports running; it stops by itself once its view moves one step, or is stopped early when the predicted peak reaches the target |
-| PARKED | device off | with `park_when_shared`, heat arrives from other heads and the room is within `park_margin` of the target; or hysteresis cut power |
+| PARKED | device off | the room is `off_threshold` past the target: at once while heat arrives from other heads, otherwise after the hysteresis `off_delay` (or at once past `off_limit`) |
 
 A powered head on a shared outdoor unit keeps receiving refrigerant while
 another head runs, and its fan carries that heat into the room. Only switching
-it off stops that, hence PARKED. A parked head is switched back on (idle) once
-demand reaches `start_threshold` − 0.2.
+it off stops that, hence PARKED. Power follows the hysteresis band:
+
+- Inside the band the head stays powered, taking heat from other heads while
+  they run instead of switching off and on for every small rise.
+- Past `off_threshold` it is parked. Heat from other heads won't stop while it
+  is powered, so with shared heat it is parked at once rather than after
+  `off_delay`. Without shared heat `off_delay` and `off_limit` apply as usual,
+  and a run is stopped while the hysteresis holds.
+- A parked head is switched back on, idle, once the room is `on_threshold`
+  short of the target. Hysteresis itself never switches the head on.
+
+The band width trades comfort for power cycles: a wider band means longer
+stretches powered and longer stretches parked.
 
 - `start_threshold` (default 0.5°C) must be below `max_adjustment_over`. Once a
   few runs are learned it follows the room: half the learned gain of a start.
-- `park_margin` (default 0.2°C) is replaced by the learned leak rate once known.
+- Start control requires `hysteresis`.
 - Heat arriving from other heads is detected on the head itself (the room
   rising while the head is idle and past its own coast, with humidity falling
   when `humidity_sensor` is set). A supervisor can also tell the head directly
-  with the `set_shared_heat_hint(active, valid_for_s)` and
-  `request_park(park, valid_for_s)` methods, exposed as ESPHome actions; the
-  hints expire on the head.
-- Hysteresis stays as the backstop: its off threshold still cuts power (at
-  once; `off_delay` is ignored), but it no longer switches the head on.
+  with the `set_shared_heat_hint(active, valid_for_s)` method, exposed as an
+  ESPHome action; the hint expires on the head.
 - What start control learns is saved across reboots like the room model;
   `reset_tuning()` clears it too.
 
@@ -178,14 +185,10 @@ api:
       variables: {active: bool, valid_for_s: int}
       then:
         - lambda: id(hvac).set_shared_heat_hint(active, valid_for_s);
-    - action: request_park
-      variables: {park: bool, valid_for_s: int}
-      then:
-        - lambda: id(hvac).request_park(park, valid_for_s);
 ```
 
 The [`climate_adaptivepid_supervisor`](custom_components/climate_adaptivepid_supervisor)
-Home Assistant integration (installable through HACS) sends those hints from
+Home Assistant integration (installable through HACS) sends that hint from
 the other heads' `Operating` sensors. See
 [docs/supervisor-design.md](docs/supervisor-design.md).
 

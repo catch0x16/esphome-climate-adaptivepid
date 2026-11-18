@@ -14,9 +14,7 @@ from homeassistant.util import dt as dt_util
 from custom_components.climate_adaptivepid_supervisor.const import (
     CONF_HEADS,
     CONF_HINTED,
-    CONF_PARK_MARGIN,
     DOMAIN,
-    PARK_VALID_SECONDS,
     SHARED_HEAT_VALID_SECONDS,
 )
 
@@ -30,7 +28,6 @@ async def setup_supervisor(hass: HomeAssistant, house: FakeHouse) -> MockConfigE
         data={
             CONF_HEADS: [h.climate for h in house.heads.values()],
             CONF_HINTED: [house.heads["hailee"].climate],
-            CONF_PARK_MARGIN: 0.2,
         },
     )
     entry.add_to_hass(hass)
@@ -41,33 +38,29 @@ async def setup_supervisor(hass: HomeAssistant, house: FakeHouse) -> MockConfigE
 
 async def test_hint_lifecycle(hass: HomeAssistant, house: FakeHouse) -> None:
     await setup_supervisor(hass, house)
-    # Nobody running: shared heat cleared, no park request.
+    # Nobody running: shared heat cleared.
     assert house.calls("hailee") == [("shared_heat", {"active": False, "valid_for_s": SHARED_HEAT_VALID_SECONDS})]
     assert house.calls("primary") == [] and house.calls("main") == []
 
-    # The primary bedroom starts; Hailee's room is 0.28 below target (outside the 0.2 margin): take the leak.
+    # The primary bedroom starts: shared heat on.
     house.heads["hailee"].calls.clear()
     house.set_operating("primary", True)
     await hass.async_block_till_done()
-    assert house.calls("hailee") == [
-        ("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS}),
-        ("request_park", {"park": False, "valid_for_s": PARK_VALID_SECONDS}),
-    ]
+    assert house.calls("hailee") == [("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS})]
     assert hass.states.get("binary_sensor.outdoor_unit_outdoor_unit_running").state == "on"
 
-    # The room warms to within the margin: park.
+    # A room temperature change alone sends nothing new.
     house.heads["hailee"].calls.clear()
     house.set_climate("hailee", room=20.15)
     await hass.async_block_till_done()
-    assert ("request_park", {"park": True, "valid_for_s": PARK_VALID_SECONDS}) in house.calls("hailee")
+    assert house.calls("hailee") == []
 
     # Renewed every minute while it still applies.
-    house.heads["hailee"].calls.clear()
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
     await hass.async_block_till_done()
-    assert ("request_park", {"park": True, "valid_for_s": PARK_VALID_SECONDS}) in house.calls("hailee")
+    assert house.calls("hailee") == [("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS})]
 
-    # The primary stops: shared heat cleared, the park request left to expire.
+    # The primary stops: shared heat cleared.
     house.heads["hailee"].calls.clear()
     house.set_operating("primary", False)
     await hass.async_block_till_done()
@@ -122,12 +115,12 @@ async def test_config_flow(hass: HomeAssistant, house: FakeHouse) -> None:
     heads = [h.climate for h in house.heads.values()]
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {"name": "Outdoor unit", CONF_HEADS: heads[:1], CONF_HINTED: [], CONF_PARK_MARGIN: 0.2},
+        {"name": "Outdoor unit", CONF_HEADS: heads[:1], CONF_HINTED: []},
     )
     assert result["errors"] == {CONF_HEADS: "need_two_heads"}
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {"name": "Outdoor unit", CONF_HEADS: heads, CONF_HINTED: [heads[0]], CONF_PARK_MARGIN: 0.25},
+        {"name": "Outdoor unit", CONF_HEADS: heads, CONF_HINTED: [heads[0]]},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {CONF_HEADS: heads, CONF_HINTED: [heads[0]], CONF_PARK_MARGIN: 0.25}
+    assert result["data"] == {CONF_HEADS: heads, CONF_HINTED: [heads[0]]}

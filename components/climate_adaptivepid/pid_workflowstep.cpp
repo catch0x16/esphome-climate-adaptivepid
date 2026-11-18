@@ -178,21 +178,7 @@ namespace workflow {
                 static_cast<unsigned>(validMs / 1000));
         }
 
-        void PidWorkflowStep::requestPark(bool park, uint32_t validMs) {
-            this->parkHint = park ? workflow::start::ParkHint::PARK : workflow::start::ParkHint::UNPARK;
-            this->parkHintFromMs = esphome::millis();
-            this->parkHintValidMs = validMs;
-            ESP_LOGI(TAG, "Supervisor: %s for %u s", park ? "park" : "unpark", static_cast<unsigned>(validMs / 1000));
-        }
-
         bool PidWorkflowStep::sharedHeat() const { return this->detector.active(esphome::millis()); }
-
-        workflow::start::ParkHint PidWorkflowStep::currentParkHint(uint32_t now) const {
-            if (this->parkHintValidMs == 0 || static_cast<uint32_t>(now - this->parkHintFromMs) >= this->parkHintValidMs) {
-                return workflow::start::ParkHint::NONE;
-            }
-            return this->parkHint;
-        }
 
         void PidWorkflowStep::runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager) {
             using namespace workflow::start;
@@ -210,8 +196,9 @@ namespace workflow {
             const bool operating = powered && status.operating;
 
             // The PID only supplies demand here. It keeps running while the head
-            // is parked, so demand can switch it back on; its integral is frozen
-            // whenever the controller holds the output below what it asks for.
+            // is parked, so demand is current once it is switched back on; its
+            // integral is frozen whenever the controller holds the output below
+            // what it asks for.
             const float output = this->adaptivePID->update(currentTemperature, now, true);
             const float demand = heating ? output - target : target - output;
             // Demand is capped at the PID's output limit; a threshold at or past
@@ -229,13 +216,6 @@ namespace workflow {
             }
             this->effectiveStartThreshold = startThreshold;
             this->startCtl.set_start_threshold(startThreshold);
-            float parkMargin = this->startConfig.park_margin;
-            const float leak = this->bursts.leak_per_min();
-            if (std::isfinite(leak)) {
-                // Detection takes about the detector's window (2 min); park that much early.
-                parkMargin = devicestate::clamp(leak * 2.0f, 0.1f, 0.6f);
-            }
-            this->startCtl.set_park_margin(parkMargin);
 
             // Shared heat: only while the head is powered, idle and past its own coast.
             const bool eligible = powered && !operating && this->startCtl.state() == HeadState::IDLE &&
@@ -256,15 +236,15 @@ namespace workflow {
             in.room_rising = this->detector.rising(now);
             in.shared_heat = shared;
             in.coast = this->bursts.coast(shared);
-            in.hint = this->currentParkHint(now);
+            in.hold = this->holdLeast && powered;
             const StartDecision decision = this->startCtl.update(in);
             this->adaptivePID->set_integral_frozen(decision.freeze_integral);
 
             if (this->bursts.update(now, heating, decision.state, powered, currentTemperature, shared)) {
                 const BurstState &b = this->bursts.state();
-                ESP_LOGI(TAG, "Start control learned: gain alone %.2f (%u runs), shared %.2f (%u runs); coast alone %.2f, shared %.2f, after %.1f min; leak %.3f C/min (%u)",
+                ESP_LOGI(TAG, "Start control learned: gain alone %.2f (%u runs), shared %.2f (%u runs); coast alone %.2f, shared %.2f, after %.1f min",
                     b.gain[0], static_cast<unsigned>(b.gain_count[0]), b.gain[1], static_cast<unsigned>(b.gain_count[1]),
-                    b.coast[0], b.coast[1], b.coast_time_s / 60.0f, b.leak_per_min, static_cast<unsigned>(b.leak_count));
+                    b.coast[0], b.coast[1], b.coast_time_s / 60.0f);
             }
             if (decision.transition != Transition::NONE) {
                 ESP_LOGI(TAG, "Start control: %s -> %s (room %.2f, target %.2f, demand %.2f / %.2f, unit sees %.1f, shared heat %s%s)",

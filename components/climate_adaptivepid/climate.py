@@ -96,10 +96,18 @@ PID_SCHEMA = cv.Schema(
         cv.Optional(CONF_START_THRESHOLD, default=0.5): cv.float_range(
             min=0.1, max=3.0
         ),
-        # Switch the device off while heat arrives from other heads on a shared
-        # outdoor unit and the room is within park_margin of the target.
-        cv.Optional(CONF_PARK_WHEN_SHARED, default=False): cv.boolean,
-        cv.Optional(CONF_PARK_MARGIN, default=0.2): cv.float_range(min=0.0, max=2.0),
+        # Parking follows the hysteresis band under start control: the head is
+        # switched off past off_threshold (at once while heat arrives from other
+        # heads) and back on at on_threshold.
+        cv.Optional(CONF_PARK_WHEN_SHARED): cv.invalid(
+            f"{CONF_PARK_WHEN_SHARED} was removed: under {CONF_START_CONTROL} the head "
+            "parks past hysteresis off_threshold (at once while heat arrives from "
+            "other heads) and switches back on at hysteresis on_threshold"
+        ),
+        cv.Optional(CONF_PARK_MARGIN): cv.invalid(
+            f"{CONF_PARK_MARGIN} was removed: use hysteresis off_threshold, where "
+            f"{CONF_START_CONTROL} parks the head while heat arrives from other heads"
+        ),
         # Continuous tuning: kp and ki follow the measured response of the room.
         # The configured kp and ki are then only the starting values.
         cv.Optional(CONF_ADAPTIVE, default=True): cv.boolean,
@@ -127,11 +135,6 @@ PID_SCHEMA = cv.Schema(
 
 
 def _validate_start_control(conf):
-    if conf[CONF_PARK_WHEN_SHARED] and not conf[CONF_START_CONTROL]:
-        raise cv.Invalid(
-            f"{CONF_PARK_WHEN_SHARED} requires {CONF_START_CONTROL}",
-            path=[CONF_PARK_WHEN_SHARED],
-        )
     if conf[CONF_START_CONTROL] and conf[CONF_START_THRESHOLD] >= conf[CONF_MAX_ADJUSTMENT_OVER]:
         raise cv.Invalid(
             f"{CONF_START_THRESHOLD} must be below {CONF_MAX_ADJUSTMENT_OVER}: the PID's "
@@ -182,6 +185,21 @@ def _validate_off_limit(conf):
 
 
 HYSTERESIS_SCHEMA = cv.All(HYSTERESIS_SCHEMA, _validate_off_limit)
+
+
+def _validate_start_control_hysteresis(config):
+    # Start control parks and unparks the head on the hysteresis band.
+    if (
+        CONF_PID in config
+        and config[CONF_PID][CONF_START_CONTROL]
+        and CONF_HYSTERESIS not in config
+    ):
+        raise cv.Invalid(
+            f"{CONF_START_CONTROL} requires {CONF_HYSTERESIS}: the head is parked past "
+            "its off_threshold and switched back on at its on_threshold",
+            path=[CONF_PID, CONF_START_CONTROL],
+        )
+    return config
 
 
 def _temperature_sensor_schema():
@@ -271,9 +289,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_START_THRESHOLD_SENSOR, default={CONF_NAME: "Start threshold"}
             ): _gain_sensor_schema(2, "°C"),
-            cv.Optional(
-                CONF_LEAK_RATE, default={CONF_NAME: "Leak rate"}
-            ): _gain_sensor_schema(2, "°C/h"),
+            cv.Optional(CONF_LEAK_RATE): cv.invalid(
+                f"{CONF_LEAK_RATE} was removed along with learned parking"
+            ),
             cv.Optional(
                 CONF_SHARED_HEAT, default={CONF_NAME: "Shared heat"}
             ): _power_sensor_schema(DEVICE_CLASS_RUNNING),
@@ -281,6 +299,7 @@ CONFIG_SCHEMA = cv.All(
     )
     .extend(cv.COMPONENT_SCHEMA),
     cv.has_at_least_one_key(CONF_PID, CONF_HYSTERESIS),
+    _validate_start_control_hysteresis,
 )
 
 
@@ -324,8 +343,6 @@ async def to_code(config):
         cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
         cg.add(var.set_start_control(conf[CONF_START_CONTROL]))
         cg.add(var.set_start_threshold(conf[CONF_START_THRESHOLD]))
-        cg.add(var.set_park_when_shared(conf[CONF_PARK_WHEN_SHARED]))
-        cg.add(var.set_park_margin(conf[CONF_PARK_MARGIN]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))
@@ -385,7 +402,6 @@ async def to_code(config):
             for key, setter in (
                 (CONF_CONTROL_STATE, var.set_control_state_sensor),
                 (CONF_START_THRESHOLD_SENSOR, var.set_start_threshold_sensor),
-                (CONF_LEAK_RATE, var.set_leak_rate_sensor),
             ):
                 cg.add(setter(await sensor.new_sensor(config[key])))
             cg.add(

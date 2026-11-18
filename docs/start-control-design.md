@@ -59,24 +59,28 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 
 | From → to | Trigger | Action |
 |---|---|---|
-| IDLE → START | demand ≥ `start_threshold`, **and** no shared heat, **and** the room isn't rising (≥ 0.02 °C/min over 2 min), **and** ≥ `min_cycle_duration` since the last stop, **and** no park request | setpoint = view |
+| IDLE → START | demand ≥ `start_threshold`, **and** no shared heat, **and** the room isn't rising (≥ 0.02 °C/min over 2 min), **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding | setpoint = view |
 | START → RUN | the unit reports `operating` | setpoint = view at start − 1 step |
 | START → IDLE | no `operating` within 60 s | idle setpoint |
 | RUN → IDLE | the unit stops by itself | idle setpoint |
 | RUN → IDLE (early stop) | at least 2 minutes running, **and** room + learned coast ≥ target | idle setpoint (the unit stops within 10 s) |
 | RUN → IDLE | shared heat starts | idle setpoint |
 | IDLE → RUN | the unit runs without a START, more than 60 s after the last commanded stop | tracked as a run (logged as unrequested) |
-| IDLE → PARKED | `park_when_shared`, **and** (shared heat **and** room ≥ target − `park_margin`, **or** a supervisor park request), **and** ≥ `min_cycle_duration` since the last power change | switch the device off |
-| any → PARKED | the device is off (parked, or cut by the hysteresis backstop) | — |
-| PARKED → IDLE | demand ≥ `start_threshold` − 0.2 (≥ `start_threshold` while a park request is active), **or** a supervisor unpark request | switch the device on at the idle setpoint, never the target |
+| START/RUN → IDLE | hysteresis is holding (room past `off_threshold`, waiting out `off_delay`) | idle setpoint |
+| IDLE → PARKED | shared heat **and** room > target + `off_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device off (at once, no `off_delay`) |
+| any → PARKED | the device is off (parked, or cut by hysteresis after `off_delay` / past `off_limit`) | — |
+| PARKED → IDLE | room < target − `on_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device on at the idle setpoint, never the target |
 
 **Demand** is the PID's output minus the target (target minus output when cooling): how much more output the PID asks for. Because it includes the integral, a room that has been below target for a long time starts sooner.
 
-**The integral** accumulates only while IDLE. It is frozen in START, RUN and PARKED, while the controller holds the output below what the PID asks for. While PARKED the PID keeps running, unlike the regular path, which resets it when the device is off, so demand can unpark the head.
+**The integral** accumulates only while IDLE. It is frozen in START, RUN and PARKED, while the controller holds the output below what the PID asks for. While PARKED the PID keeps running, unlike the regular path, which resets it when the device is off, so demand is current once the head is switched back on.
 
-**Leaving PARKED.** A parked head can't see shared heat: its fan is off, so nothing reaches the sensors. Unparking therefore follows the room's own demand. Unparking slightly below the start threshold (−0.2) gives the head a chance to take leaking heat before it needs a run of its own:
-- **Another head is still running:** the room warms from the leak, and the head parks again near target.
-- **Nothing else is running:** IDLE → START happens as usual.
+**Power follows the hysteresis band.** Parking and unparking use the hysteresis settings, so start control has no thresholds of its own for power:
+- **Inside the band** (between target − `on_threshold` and target + `off_threshold`) the head stays powered. While another head runs it takes the leak instead of switching off and on for every small rise.
+- **Past `off_threshold`** it is parked. With shared heat at once: the leak won't stop while the head is powered, so waiting out `off_delay` only adds overshoot. Without shared heat the hysteresis step cuts it after `off_delay` (or at once past `off_limit`), stopping any run while it holds, as on the regular path.
+- **Back on at `on_threshold`.** A parked head can't see shared heat (its fan is off), so it is switched back on, idle, on the room alone. Then IDLE → START happens as usual, or the leak warms it again if another head is still running.
+
+The band width is the trade between comfort and power cycles. On 18 November a band of about 0.2 (park within 0.2 of the target, unpark on demand) held Hailee's room within −0.16…+0.18 with no runs of its own, at about 1.6 power cycles an hour, each powered stretch lasting 1–3 minutes.
 
 ## Shared heat
 
@@ -102,10 +106,9 @@ It turns off once the room has stopped moving (≤ 0.01 °C/min over 2 minutes),
 | Gain (alone) | peak − room at start | `start_threshold` = kp × gain / 2 (clamped to 0.2…3.0, and below `max_adjustment_over`) | the configured `start_threshold` |
 | Coast (alone, shared) | peak − room at stop | early stop: room + coast ≥ target | 0.3 alone, 0.6 shared |
 | Coast time | peak time − stop time | detector eligibility | 5 min |
-| Leak rate | room change ÷ time over a shared-heat episode of at least 2 minutes | `park_margin` = leak × 2 min (clamped to 0.1…0.6) | the configured `park_margin` |
 
 - **Smoothing:** each sample moves the estimate 30% of the way.
-- **Minimum data:** a learned value is used after 3 runs (2 episodes for the leak rate).
+- **Minimum data:** a learned value is used after 3 runs.
 - **Discarded runs:** a run whose coast was cut short (device switched off, a new start) is not recorded, because it would understate the coast.
 - **Persistence:** saved in its own preference (`BURSTS_PREFERENCE_TYPE`) on the same schedule as the room model and on safe shutdown. `reset_tuning()` clears it.
 
@@ -119,21 +122,22 @@ climate:
       max_adjustment_over: 1.0         # must exceed start_threshold
       start_control: true
       start_threshold: 0.5             # PID demand that starts a run, C
-      park_when_shared: true           # requires start_control
-      park_margin: 0.2                 # park within this of the target, C
-    hysteresis:
-      off_threshold: 0.75              # backstop cut
+    hysteresis:                        # required with start_control
+      on_threshold: 0.25               # a parked head is switched back on (idle) this far below target
+      off_threshold: 0.4               # parked this far past target (at once with shared heat)
+      off_delay: 5min                  # optional; only without shared heat
+      off_limit: 0.75                  # optional; cut at once past this
       min_cycle_duration: 60s          # also the minimum between starts and power changes
 ```
 
 Validation rejects:
 - **`start_threshold` at or above `max_adjustment_over`:** demand is capped there, so the unit could never start.
-- **`park_when_shared` without `start_control`.**
+- **`start_control` without `hysteresis`.**
+- **`park_when_shared`, `park_margin` and the `leak_rate` sensor:** removed; parking follows the hysteresis band.
 
 **Diagnostics** (created only with start control):
 - **`Control state`:** 0 IDLE, 1 START, 2 RUN, 3 PARKED.
 - **`Start threshold`:** the one in use, learned or configured.
-- **`Leak rate`:** in °C/h.
 - **`Shared heat`.**
 
 Every transition is logged at INFO with room, target, demand, the threshold, the unit's view, and the shared-heat source.
@@ -143,29 +147,28 @@ Every transition is logged at INFO with room, target, demand, the threshold, the
 | Setting | With start control |
 |---|---|
 | `setpoint_deadband`, directional rounding | Not used: the three levels are already on the grid (`internalSetDeviceTemperature` rounds to nearest, without a deadband). Still used by rooms without start control. |
-| Hysteresis `on_threshold` | Ignored: hysteresis never switches the head on. |
-| Hysteresis `off_threshold` / `off_limit` | The backstop. A cut counts as PARKED. |
-| Hysteresis `off_delay` (hold) | Ignored (no hold). |
+| Hysteresis `on_threshold` | Where the start controller switches a parked head back on (idle). Hysteresis itself never switches the head on. |
+| Hysteresis `off_threshold` | Where the head is parked: at once with shared heat (start controller), otherwise by the hysteresis step after `off_delay`. A cut counts as PARKED. |
+| Hysteresis `off_delay` / `off_limit` (hold) | Apply without shared heat; while holding, a run is stopped and none is started. |
 | Switching to HEAT/COOL | The device is switched on at the idle setpoint, not the target. |
 | Reboot with HEAT and the device off | Left off. The start controller switches it on when demand calls for it. |
 | `run_backoff`, `increase_rate` | Removed: RUN replaces `run_backoff`, and `increase_rate` shaped a continuous setpoint that is no longer sent. |
 
 ## Supervisor hints
 
-The climate exposes two methods, called from ESPHome actions in the device YAML. Both expire on the head.
+The climate exposes one method, called from an ESPHome action in the device YAML. It expires on the head.
 
 | Method | Effect |
 |---|---|
 | `set_shared_heat_hint(active, valid_for_s)` | Replaces the local shared-heat detector while valid |
-| `request_park(park, valid_for_s)` | Park (only with `park_when_shared`) or unpark while valid; a park request also raises the unpark threshold to `start_threshold` |
 
-The [`climate_adaptivepid_supervisor`](../custom_components/climate_adaptivepid_supervisor) integration sends them; see [supervisor-design.md](supervisor-design.md).
+The head makes every power decision itself; the hint only tells it, for certain, whether another head is running. The [`climate_adaptivepid_supervisor`](../custom_components/climate_adaptivepid_supervisor) integration sends it; see [supervisor-design.md](supervisor-design.md).
 
 ## Independence
 
 | Situation | Behaviour |
 |---|---|
-| Supervisor stopped or disabled | Its hints expire within 2–3 minutes; the local detector and the configured or learned thresholds take over |
+| Supervisor stopped or disabled | Its hint expires within 2 minutes; the local detector takes over |
 | Home Assistant unavailable | As above. The room temperature falls back to the unit's own sensor after `ha_temperature_timeout_minutes` (device YAML) |
 | Unit reports no temperature | The room temperature, rounded to the step, stands in for the unit's view |
 | `start_control: false` | Exactly the PID path as before |
@@ -176,25 +179,26 @@ The [`climate_adaptivepid_supervisor`](../custom_components/climate_adaptivepid_
 |---|---|
 | `start_controller.h` | State machine (pure, tested natively) |
 | `shared_heat_detector.h` | Local detector and hint expiry (pure) |
-| `burst_learner.h` | Gain, coast and leak learning (pure) |
+| `burst_learner.h` | Gain and coast learning (pure) |
 | `pid_workflowstep.cpp` (`runStartControl`) | Wiring: PID demand, detector, learner and controller; applies power and setpoints |
 | `climate_device_adapter.cpp` | `internalTurnOnAt` (switch on at a given setpoint) and `internalSetDeviceTemperature` (exact level, no deadband) |
-| `hysterisis_workflowstep.*` | `setTurnOnEnabled(false)` under start control |
+| `hysterisis_workflowstep.*` | The cut after `off_delay` and the hold; `setTurnOnEnabled(false)` under start control |
 | `climate_adaptivepid.*`, `climate.py` | Options, diagnostics, persistence, hint methods, power-on at the idle setpoint |
 
 ## Verification
 
 - **Native tests** (`uv run python tests/run_native.py`):
-  - **`test_start_controller.cpp`:** the three levels, IDLE after every stop, starts on demand only (not on a small deficit, mid-coast, with shared heat, or under a park request), the minimum cycle, early stop after the minimum run, a lagging `operating` report not counted as an unrequested start, park and unpark with throttling, the hysteresis cut as PARKED, supervisor hints, and cooling.
+  - **`test_start_controller.cpp`:** the three levels, IDLE after every stop, starts on demand only (not on a small deficit, mid-coast, with shared heat, or while hysteresis holds), the minimum cycle, early stop after the minimum run, a lagging `operating` report not counted as an unrequested start, staying powered inside the band, parking past `off_threshold` on shared heat and unparking past `on_threshold` with throttling, the hysteresis cut as PARKED, a hold stopping a run or start, and cooling.
   - **`test_shared_heat_detector.cpp`:** detection with and without humidity, rejection when humidity is steady, eligibility, cooling, and hint expiry.
-  - **`test_burst_learner.cpp`:** gain and coast alone vs shared, discarding coasts cut short and starts that never ran, the leak rate, and restoring state.
-- **Host scenario:** `tests/fixtures/start_control.yaml`, a smoke test of idle power-on, supervisor park and unpark, the backstop as PARKED, and unparking on demand.
+  - **`test_burst_learner.cpp`:** gain and coast alone vs shared, discarding coasts cut short and starts that never ran, and restoring state.
+- **Host scenario:** `tests/fixtures/start_control.yaml`, a smoke test of idle power-on, staying powered on shared heat inside the band, parking at once past `off_threshold` on shared heat, unparking at `on_threshold`, and the hysteresis cut after `off_delay` without shared heat.
 - **Live checks for Hailee's room**, against 16–18 November:
   - every start is preceded by a START log line,
   - no timer restarts at −0.5,
   - median peak at most +0.4,
   - hysteresis cuts near 0,
-  - parks happen before peaks while other heads run.
+  - parks happen at `off_threshold` while other heads run,
+  - fewer power cycles than the 18 November band (about 1.6 an hour), with the room inside target ± 0.5.
 
 ## Open questions
 

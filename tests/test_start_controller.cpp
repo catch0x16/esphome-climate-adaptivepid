@@ -34,11 +34,13 @@ static StartInput idle_input(uint32_t now, float demand) {
   return in;
 }
 
-static StartController make(bool park = false) {
+// Hysteresis band: back on at target - 0.25, parked at target + 0.4.
+static StartController make() {
   StartController c;
   StartConfig cfg;
   cfg.start_threshold = 0.5f;
-  cfg.park_when_shared = park;
+  cfg.on_threshold = 0.25f;
+  cfg.off_threshold = 0.4f;
   cfg.min_cycle_ms = 60 * S;
   c.configure(cfg);
   return c;
@@ -105,7 +107,8 @@ int main() {
           "unrequested start: running long after a stop is tracked as a run");
   }
   {
-    // No start while the room is still rising or while shared heat arrives.
+    // No start while the room is still rising, while shared heat arrives, or
+    // while hysteresis holds past its off threshold.
     StartController c = make();
     StartInput in = idle_input(0, 0.7f);
     in.room_rising = true;
@@ -114,9 +117,9 @@ int main() {
     in.shared_heat = true;
     check(c.update(in).state == HeadState::IDLE, "no start while heat arrives from other heads");
     in.shared_heat = false;
-    in.hint = ParkHint::PARK;
-    check(c.update(in).state == HeadState::IDLE, "no start while the supervisor asks to park");
-    in.hint = ParkHint::NONE;
+    in.hold = true;
+    check(c.update(in).state == HeadState::IDLE, "no start while hysteresis holds");
+    in.hold = false;
     check(c.update(in).state == HeadState::START, "starts once nothing holds it back");
   }
   {
@@ -133,13 +136,18 @@ int main() {
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "shared heat stops a run");
   }
   {
-    // Park and unpark.
-    StartController c = make(true);
+    // Park and unpark on the hysteresis band.
+    StartController c = make();
     StartInput in = idle_input(0, 0.0f);
-    in.room = 20.2f;  // within 0.2 of 20.28
+    in.room = 20.6f;  // +0.32: inside the band
     in.shared_heat = true;
     StartDecision d = c.update(in);
-    check(d.power == PowerRequest::TURN_OFF && d.transition == Transition::PARK, "park: shared heat near target");
+    check(d.power == PowerRequest::NONE && d.state == HeadState::IDLE,
+          "shared heat inside the band: stays powered and takes the leak");
+    in.now_ms = 2 * S;
+    in.room = 20.7f;  // +0.42: past off_threshold
+    d = c.update(in);
+    check(d.power == PowerRequest::TURN_OFF && d.transition == Transition::PARK, "park: shared heat past off_threshold");
     in.now_ms = 5 * S;
     in.powered = false;
     d = c.update(in);
@@ -147,18 +155,22 @@ int main() {
     check(d.freeze_integral, "parked: integral frozen");
     check(near(d.setpoint, 19.0f), "parked: the setpoint to switch on with is the idle level");
     in.now_ms = 2 * MIN;
-    in.demand = 0.25f;
+    in.shared_heat = false;
+    in.room = 20.1f;  // -0.18
+    in.demand = 0.6f;
     d = c.update(in);
-    check(d.power == PowerRequest::NONE, "parked: no unpark below the unpark threshold");
-    in.demand = 0.3f;  // 0.5 - 0.2
+    check(d.power == PowerRequest::NONE, "parked: demand alone does not unpark inside the band");
+    in.room = 20.0f;  // -0.28: past on_threshold
     d = c.update(in);
-    check(d.power == PowerRequest::TURN_ON && d.transition == Transition::UNPARK, "unpark at start threshold - 0.2");
+    check(d.power == PowerRequest::TURN_ON && d.transition == Transition::UNPARK, "unpark: room past on_threshold");
     in.now_ms = 2 * MIN + 5 * S;
     in.powered = true;
+    in.demand = 0.0f;
     d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::UNPARKED, "unparked: idle again");
-    // Still shared heat and near target: may not park again within the minimum cycle.
-    in.room = 20.2f;
+    // Shared heat past the band again: may not park within the minimum cycle.
+    in.shared_heat = true;
+    in.room = 20.7f;
     d = c.update(in);
     check(d.power == PowerRequest::NONE, "no park again within the minimum cycle");
     in.now_ms = 4 * MIN;
@@ -166,42 +178,68 @@ int main() {
     check(d.power == PowerRequest::TURN_OFF, "parks again after the minimum cycle");
   }
   {
-    // Park is off by default; shared heat alone only blocks starts.
-    StartController c = make(false);
+    // Without shared heat the controller leaves the cut to hysteresis (and its off_delay).
+    StartController c = make();
     StartInput in = idle_input(0, 0.0f);
-    in.room = 20.3f;
-    in.shared_heat = true;
-    check(c.update(in).power == PowerRequest::NONE, "no park unless park_when_shared");
+    in.room = 20.8f;
+    check(c.update(in).power == PowerRequest::NONE, "no park past the band without shared heat");
   }
   {
-    // A hysteresis cut counts as parked; the controller switches it on again on demand.
-    StartController c = make(false);
+    // A hysteresis cut counts as parked; the controller switches it on again at on_threshold.
+    StartController c = make();
     c.update(idle_input(0, 0.0f));
     StartInput in = idle_input(10 * S, 0.0f);
     in.powered = false;
     StartDecision d = c.update(in);
     check(d.state == HeadState::PARKED && d.transition == Transition::PARKED, "hysteresis cut: parked");
     in.now_ms = 2 * MIN;
+    in.room = 20.1f;
     in.demand = 0.35f;
     d = c.update(in);
-    check(d.power == PowerRequest::TURN_ON, "hysteresis cut: switched on again on demand");
+    check(d.power == PowerRequest::NONE, "hysteresis cut: stays off inside the band");
+    in.room = 19.9f;
+    d = c.update(in);
+    check(d.power == PowerRequest::TURN_ON, "hysteresis cut: switched on again at on_threshold");
   }
   {
-    // Supervisor hints.
-    StartController c = make(true);
+    // A hysteresis hold (past off_threshold, waiting out off_delay) stops a run.
+    StartController c = make();
+    c.update(idle_input(0, 0.6f));
+    StartInput in = idle_input(10 * S, 0.6f);
+    in.operating = true;
+    in.coast = 0.0f;
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::RUN, "hold: running");
+    in.now_ms = 30 * S;
+    in.hold = true;
+    d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_HOLD, "hold: run stopped before the minimum run");
+    check(near(d.setpoint, 19.0f), "hold: idle setpoint stops the compressor");
+    // A START is abandoned too.
+    StartController s = make();
+    s.update(idle_input(0, 0.6f));
+    in = idle_input(2 * S, 0.6f);
+    in.hold = true;
+    d = s.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_HOLD, "hold: start abandoned");
+  }
+  {
+    // Cooling: parked once the room is off_threshold below the target.
+    StartController c = make();
     StartInput in = idle_input(0, 0.0f);
-    in.room = 19.5f;
-    in.hint = ParkHint::PARK;
-    check(c.update(in).power == PowerRequest::TURN_OFF, "hint: park on request");
+    in.heating = false;
+    in.device_view = 23.0f;
+    in.room = 23.0f;
+    in.target = 23.5f;
+    in.shared_heat = true;
+    check(c.update(in).power == PowerRequest::TURN_OFF, "cooling: park past off_threshold below target");
     in.now_ms = 5 * S;
     in.powered = false;
     c.update(in);
     in.now_ms = 2 * MIN;
-    in.demand = 0.35f;
-    check(c.update(in).power == PowerRequest::NONE, "hint: a park request raises the unpark threshold to the start threshold");
-    in.hint = ParkHint::UNPARK;
-    in.demand = 0.0f;
-    check(c.update(in).power == PowerRequest::TURN_ON, "hint: unpark on request");
+    in.shared_heat = false;
+    in.room = 23.8f;
+    check(c.update(in).power == PowerRequest::TURN_ON, "cooling: unpark on_threshold above target");
   }
   {
     // Cooling mirrors heating.

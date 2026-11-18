@@ -82,24 +82,6 @@ int main() {
     check(l.state().gain_count[0] == 0, "start timed out: nothing recorded");
   }
   {
-    // Leak episodes: idle, powered, shared heat at +0.16 C/min for 3 minutes.
-    BurstLearner l;
-    uint32_t t = 0;
-    for (int e = 0; e < 2; e++) {
-      for (int i = 0; i <= 18; i++, t += 10 * S) {
-        l.update(t, true, HeadState::IDLE, true, 20.0f + 0.16f * i / 6.0f, true);
-      }
-      l.update(t, true, HeadState::IDLE, true, 20.5f, false);
-      t += 10 * MIN;
-    }
-    check(near(l.leak_per_min(), 0.16f, 0.01f), "leak rate learned from shared-heat episodes");
-    // Short episodes teach nothing.
-    BurstLearner s;
-    for (int i = 0; i <= 6; i++) s.update(i * 10 * S, true, HeadState::IDLE, true, 20.0f + 0.02f * i, true);
-    s.update(70 * S, true, HeadState::IDLE, true, 20.1f, false);
-    check(s.state().leak_count == 0, "short leak episode: nothing recorded");
-  }
-  {
     // State round-trips (persistence).
     BurstLearner a;
     uint32_t t = 0;

@@ -80,8 +80,7 @@ async def house(hass: HomeAssistant) -> FakeHouse:
 
             return handler
 
-        for action in ("shared_heat", "request_park"):
-            hass.services.async_register("esphome", f"{node}_{action}", make_handler())
+        hass.services.async_register("esphome", f"{node}_shared_heat", make_handler())
     house = FakeHouse(hass=hass, heads=heads)
     for key in heads:
         house.set_climate(key)

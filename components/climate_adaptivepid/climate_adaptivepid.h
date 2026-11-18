@@ -52,7 +52,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_dead_time_cooling_sensor(sensor::Sensor *sensor) { this->dead_time_cooling_sensor_ = sensor; }
   void set_control_state_sensor(sensor::Sensor *sensor) { this->control_state_sensor_ = sensor; }
   void set_start_threshold_sensor(sensor::Sensor *sensor) { this->start_threshold_sensor_ = sensor; }
-  void set_leak_rate_sensor(sensor::Sensor *sensor) { this->leak_rate_sensor_ = sensor; }
   void set_shared_heat_sensor(binary_sensor::BinarySensor *sensor) { this->shared_heat_sensor_ = sensor; }
 
   void set_update_interval(uint32_t value) { this->update_interval_ = value; }
@@ -68,8 +67,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // Start control (docs/start-control-design.md).
   void set_start_control(bool value) { this->start_control_ = value; }
   void set_start_threshold(float value) { this->start_threshold_ = value; }
-  void set_park_when_shared(bool value) { this->park_when_shared_ = value; }
-  void set_park_margin(float value) { this->park_margin_ = value; }
   void set_pid_adaptive(bool value) { this->tuning_.adaptive = value; }
   void set_pid_response_time(uint32_t ms) { this->tuning_.response_time_s = ms / 1000.0f; }
   void set_pid_dead_time(uint32_t ms) { this->tuning_.dead_time_s = ms / 1000.0f; }
@@ -100,11 +97,9 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // Forget the learned room model and start from the configured seeds.
   void reset_tuning();
 
-  // Supervisor hints for start control, each valid for valid_for_s seconds:
-  // whether heat (cooling) is arriving from other heads, and a request to park
-  // (switch the device off) or unpark. They expire on the head.
+  // Supervisor hint for start control, valid for valid_for_s seconds: whether
+  // heat (cooling) is arriving from other heads. It expires on the head.
   void set_shared_heat_hint(bool active, uint32_t valid_for_s);
-  void request_park(bool park, uint32_t valid_for_s);
 
  protected:
   static constexpr uint32_t TARGETS_VERSION = 1;
@@ -144,8 +139,8 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // At most one flash write per this interval.
   static constexpr uint32_t TUNING_SAVE_INTERVAL_MS = 60 * 60 * 1000;
 
-  // What start control learned (burst_learner.h).
-  static constexpr uint32_t BURSTS_VERSION = 1;
+  // What start control learned (burst_learner.h). Version 2 dropped the leak rate.
+  static constexpr uint32_t BURSTS_VERSION = 2;
   static constexpr uint32_t BURSTS_PREFERENCE_TYPE = 0x57464C42UL;
   struct StoredBursts {
     uint32_t version;
@@ -213,7 +208,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   sensor::Sensor *dead_time_cooling_sensor_{nullptr};
   sensor::Sensor *control_state_sensor_{nullptr};
   sensor::Sensor *start_threshold_sensor_{nullptr};
-  sensor::Sensor *leak_rate_sensor_{nullptr};
   binary_sensor::BinarySensor *shared_heat_sensor_{nullptr};
 
   climate::ClimateTraits traits_;
@@ -256,8 +250,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   float setpoint_deadband_{0.0f};
   bool start_control_{false};
   float start_threshold_{0.5f};
-  bool park_when_shared_{false};
-  float park_margin_{0.2f};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
   float hysteresis_off_limit_{NAN};

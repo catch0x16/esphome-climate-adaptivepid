@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import SupervisorConfigEntry
 from .entity import SupervisorEntity, room_key
 
-ACTIONS = ["none", "shared_heat", "park", "unpark", "disabled"]
+ACTIONS = ["none", "shared_heat", "disabled"]
 
 
 async def async_setup_entry(
@@ -20,7 +20,7 @@ async def async_setup_entry(
 
 
 class SupervisorAction(SupervisorEntity, SensorEntity):
-    """none, shared_heat, park, unpark or disabled; the reason as an attribute."""
+    """none, shared_heat or disabled; the reason as an attribute."""
 
     _attr_translation_key = "supervisor_action"
     _attr_device_class = SensorDeviceClass.ENUM
@@ -38,10 +38,6 @@ class SupervisorAction(SupervisorEntity, SensorEntity):
         room_plan = self.coordinator.plans.get(self._climate)
         if room_plan is None or not room_plan.shared_heat:
             return "none"
-        if room_plan.park is True:
-            return "park"
-        if room_plan.park is False:
-            return "unpark"
         return "shared_heat"
 
     @property

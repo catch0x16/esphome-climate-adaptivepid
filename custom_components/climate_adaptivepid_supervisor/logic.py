@@ -9,17 +9,10 @@ head runs, an idle head that is still powered keeps receiving refrigerant and
 its fan carries that into its room. A head can only infer that from its own
 room; the supervisor sees every head's `operating` and knows for certain.
 
-For each room that receives hints:
-
-- Shared heat: on while any *other* head in the group is operating. The room's
-  own run never counts.
-- Park: while other heads run and the room is within `park_margin` of its
-  target (or past it), ask the head to park (switch off), so the leak can't
-  overshoot.
-- Unpark: while other heads run and the room is further below its target than
-  that, ask the head to unpark, so it takes the leak instead of starting a run
-  of its own.
-- With no other head running there is no park request: the head decides alone.
+For each room that receives hints, shared heat is on while any *other* head in
+the group is operating; the room's own run never counts. The head decides what
+to do with it: it starts no run of its own while shared heat is on, and parks
+(switches off) at once once its room is past its hysteresis off_threshold.
 """
 
 from __future__ import annotations
@@ -35,8 +28,6 @@ class Head:
     operating: bool | None = None
     # "heat", "cool" or anything else (no hints outside heat and cool).
     mode: str | None = None
-    room: float | None = None
-    target: float | None = None
 
 
 @dataclass(frozen=True)
@@ -44,8 +35,6 @@ class RoomPlan:
     """What to tell one hinted room's head."""
 
     shared_heat: bool
-    # True: park, False: unpark, None: no request (let any earlier one expire).
-    park: bool | None
     reason: str
 
 
@@ -54,39 +43,22 @@ def outdoor_unit_running(heads: dict[str, Head]) -> bool:
     return any(head.operating for head in heads.values())
 
 
-def plan_room(name: str, heads: dict[str, Head], park_margin: float) -> RoomPlan | None:
-    """The hints for one room, or None when nothing should be sent."""
+def plan_room(name: str, heads: dict[str, Head]) -> RoomPlan | None:
+    """The hint for one room, or None when nothing should be sent."""
     head = heads.get(name)
     if head is None or head.mode not in ("heat", "cool"):
         return None
     running = sorted(other.name for key, other in heads.items() if key != name and other.operating)
     if not running:
-        return RoomPlan(shared_heat=False, park=None, reason="no other head running")
-
-    others = ", ".join(running)
-    if head.room is None or head.target is None:
-        return RoomPlan(shared_heat=True, park=None, reason=f"{others} running; room temperature unknown")
-    sign = 1.0 if head.mode == "heat" else -1.0
-    # How far the room is past its target, in the direction the leak pushes it.
-    past = sign * (head.room - head.target)
-    if past >= -park_margin:
-        return RoomPlan(
-            shared_heat=True,
-            park=True,
-            reason=f"{others} running; room {past:+.2f} from target, within {park_margin:.2f}: park",
-        )
-    return RoomPlan(
-        shared_heat=True,
-        park=False,
-        reason=f"{others} running; room {past:+.2f} from target: take the leak",
-    )
+        return RoomPlan(shared_heat=False, reason="no other head running")
+    return RoomPlan(shared_heat=True, reason=f"{', '.join(running)} running")
 
 
-def plan(heads: dict[str, Head], hinted: list[str], park_margin: float) -> dict[str, RoomPlan]:
+def plan(heads: dict[str, Head], hinted: list[str]) -> dict[str, RoomPlan]:
     """The hints for every hinted room that should get one."""
     plans: dict[str, RoomPlan] = {}
     for name in hinted:
-        room_plan = plan_room(name, heads, park_margin)
+        room_plan = plan_room(name, heads)
         if room_plan is not None:
             plans[name] = room_plan
     return plans

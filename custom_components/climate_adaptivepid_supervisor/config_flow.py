@@ -11,7 +11,7 @@ from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import CONF_HEADS, CONF_HINTED, CONF_PARK_MARGIN, DEFAULT_NAME, DEFAULT_PARK_MARGIN, DOMAIN
+from .const import CONF_HEADS, CONF_HINTED, DEFAULT_NAME, DOMAIN
 
 
 def _schema(defaults: dict[str, Any], with_name: bool) -> vol.Schema:
@@ -23,11 +23,6 @@ def _schema(defaults: dict[str, Any], with_name: bool) -> vol.Schema:
     )
     fields[vol.Optional(CONF_HINTED, default=defaults.get(CONF_HINTED, []))] = selector.EntitySelector(
         selector.EntitySelectorConfig(domain="climate", multiple=True)
-    )
-    fields[vol.Required(CONF_PARK_MARGIN, default=defaults.get(CONF_PARK_MARGIN, DEFAULT_PARK_MARGIN))] = (
-        selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0.0, max=2.0, step=0.05, unit_of_measurement="°C", mode="box")
-        )
     )
     return vol.Schema(fields)
 

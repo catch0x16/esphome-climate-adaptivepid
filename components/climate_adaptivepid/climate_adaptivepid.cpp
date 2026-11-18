@@ -236,15 +236,15 @@ void ClimateAdaptivePID::load_bursts_() {
     this->pid_step_->restoreBurstState(loaded.state);
     this->stored_bursts_ = loaded;
     const workflow::start::BurstState &b = loaded.state;
-    ESP_LOGI(TAG, "Start control restored: gain alone %.2f (%u runs), coast alone %.2f, shared %.2f, leak %.3f C/min",
-             b.gain[0], static_cast<unsigned>(b.gain_count[0]), b.coast[0], b.coast[1], b.leak_per_min);
+    ESP_LOGI(TAG, "Start control restored: gain alone %.2f (%u runs), coast alone %.2f, shared %.2f",
+             b.gain[0], static_cast<unsigned>(b.gain_count[0]), b.coast[0], b.coast[1]);
   } else {
     this->stored_bursts_ = StoredBursts{BURSTS_VERSION, this->pid_step_->burstState()};
   }
 }
 
 static bool same_bursts(const workflow::start::BurstState &a, const workflow::start::BurstState &b) {
-  return a.gain_count[0] == b.gain_count[0] && a.gain_count[1] == b.gain_count[1] && a.leak_count == b.leak_count;
+  return a.gain_count[0] == b.gain_count[0] && a.gain_count[1] == b.gain_count[1];
 }
 
 void ClimateAdaptivePID::save_bursts_(uint32_t now, bool force) {
@@ -269,14 +269,6 @@ void ClimateAdaptivePID::set_shared_heat_hint(bool active, uint32_t valid_for_s)
     return;
   }
   this->pid_step_->setSharedHeatHint(active, valid_for_s * 1000U);
-}
-
-void ClimateAdaptivePID::request_park(bool park, uint32_t valid_for_s) {
-  if (this->pid_step_ == nullptr || !this->pid_step_->isStartControl()) {
-    ESP_LOGW(TAG, "request_park: start control is not enabled");
-    return;
-  }
-  this->pid_step_->requestPark(park, valid_for_s * 1000U);
 }
 
 void ClimateAdaptivePID::reset_tuning() {
@@ -334,12 +326,13 @@ void ClimateAdaptivePID::setup() {
   }
 
   if (this->hysteresis_enabled_) {
-    // Under start control hysteresis is only the backstop: it cuts power past
-    // its off threshold at once (no hold), and never switches the head on.
+    // Under start control hysteresis never switches the head on (the start
+    // controller switches a parked head back on at the on threshold). It still
+    // cuts power past its off threshold, after off_delay; the start controller
+    // parks at once instead while heat arrives from other heads.
     const bool start_control = this->pid_enabled_ && this->start_control_;
     this->hysteresis_step_ = new (std::nothrow) workflow::hysterisis::HysterisisWorkflowStep(
-        this->hysteresis_on_, this->hysteresis_off_, this->hysteresis_off_limit_,
-        start_control ? 0 : this->hysteresis_off_delay_ms_);
+        this->hysteresis_on_, this->hysteresis_off_, this->hysteresis_off_limit_, this->hysteresis_off_delay_ms_);
     if (this->hysteresis_step_ == nullptr) {
       ESP_LOGE(TAG, "Failed to allocate the hysteresis step");
       this->mark_failed();
@@ -359,8 +352,8 @@ void ClimateAdaptivePID::setup() {
     if (this->start_control_) {
       workflow::start::StartConfig config;
       config.start_threshold = this->start_threshold_;
-      config.park_when_shared = this->park_when_shared_;
-      config.park_margin = this->park_margin_;
+      config.on_threshold = this->hysteresis_on_;
+      config.off_threshold = this->hysteresis_off_;
       config.min_cycle_ms = this->min_cycle_ms_;
       const float step = this->traits_.get_visual_target_temperature_step();
       config.step = step > 0.0f ? step : 0.5f;
@@ -757,7 +750,6 @@ void ClimateAdaptivePID::publish_diagnostics_() {
     if (this->pid_step_->isStartControl()) {
       publish_value(this->control_state_sensor_, static_cast<float>(this->pid_step_->startState()));
       publish_value(this->start_threshold_sensor_, this->pid_step_->startThreshold());
-      publish_value(this->leak_rate_sensor_, this->pid_step_->burstState().leak_per_min * 60.0f);
       publish_binary(this->shared_heat_sensor_, this->pid_step_->sharedHeat());
     }
   }
@@ -773,8 +765,8 @@ void ClimateAdaptivePID::dump_config() {
                   this->ki_, this->kd_, this->max_adjustment_under_, this->max_adjustment_over_,
                   this->setpoint_deadband_);
     if (this->start_control_) {
-      ESP_LOGCONFIG(TAG, "  Start control: start threshold %.2f, park when shared: %s (margin %.2f), humidity: %s",
-                    this->start_threshold_, YESNO(this->park_when_shared_), this->park_margin_,
+      ESP_LOGCONFIG(TAG, "  Start control: start threshold %.2f, on below -%.2f, park past +%.2f, humidity: %s",
+                    this->start_threshold_, this->hysteresis_on_, this->hysteresis_off_,
                     this->humidity_sensor_ != nullptr ? "sensor" : "none");
     }
     if (this->tuning_.adaptive) {

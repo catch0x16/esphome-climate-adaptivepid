@@ -33,12 +33,8 @@ namespace workflow {
             workflow::start::SharedHeatDetector detector;
             workflow::start::BurstLearner bursts;
             float effectiveStartThreshold{NAN};
-            workflow::start::ParkHint parkHint{workflow::start::ParkHint::NONE};
-            uint32_t parkHintFromMs{0};
-            uint32_t parkHintValidMs{0};
 
             void runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager);
-            workflow::start::ParkHint currentParkHint(uint32_t now) const;
             TuningConfig tuning;
 
             float minTemp;
@@ -80,7 +76,8 @@ namespace workflow {
             // Outdoor temperature for the model's heat loss; NaN when unknown.
             void setOutdoorTemperature(float value) { this->outdoorTemperature = value; }
             // Hold the device at the least output allowed (hysteresis is waiting
-            // to switch it off); the integral is frozen meanwhile.
+            // to switch it off); the integral is frozen meanwhile. Under start
+            // control a run is stopped and none is started.
             void setHoldLeast(bool value) { this->holdLeast = value; }
             // Room humidity for the shared-heat detector; NaN when unknown.
             void setHumidity(float value) { this->humidity = value; }
@@ -94,9 +91,8 @@ namespace workflow {
             const workflow::start::BurstState &burstState() const { return this->bursts.state(); }
             void restoreBurstState(const workflow::start::BurstState &state) { this->bursts.set_state(state); }
             void resetBurstState() { this->bursts.reset(); }
-            // Supervisor hints; they expire after valid_ms.
+            // Supervisor hint; it expires after valid_ms.
             void setSharedHeatHint(bool active, uint32_t validMs);
-            void requestPark(bool park, uint32_t validMs);
             // Start from a model state. A restored rate was learned before the
             // last reboot; a seeded one keeps the configured ki until that
             // mode's first measurement.

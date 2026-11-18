@@ -28,6 +28,11 @@
 //           leaks from a shared outdoor unit into the room; only switching it
 //           off stops that)
 //
+// Power follows the hysteresis band: a head is parked once the room is
+// off_threshold past the target while heat arrives from other heads (without
+// shared heat the hysteresis step cuts it, after its off_delay), and switched
+// back on, idle, once the room is on_threshold short of the target.
+//
 // Everything is mirrored when cooling.
 namespace workflow {
 namespace start {
@@ -48,9 +53,6 @@ inline const char *head_state_to_string(HeadState state) {
   return "UNKNOWN";
 }
 
-// A supervisor's request, valid until it expires.
-enum class ParkHint : uint8_t { NONE, PARK, UNPARK };
-
 enum class PowerRequest : uint8_t { NONE, TURN_ON, TURN_OFF };
 
 enum class Transition : uint8_t {
@@ -61,10 +63,11 @@ enum class Transition : uint8_t {
   STOPPED_BY_UNIT,    // RUN -> IDLE: the unit stopped by itself
   STOPPED_EARLY,      // RUN -> IDLE: the predicted peak reached the target
   STOPPED_SHARED,     // RUN -> IDLE: heat started arriving from other heads
+  STOPPED_HOLD,       // START/RUN -> IDLE: past the off threshold, hysteresis is holding
   UNREQUESTED_START,  // IDLE -> RUN: the unit started without a START
-  PARK,               // IDLE: asking for the device to be switched off
+  PARK,               // IDLE: shared heat past the off threshold; switching the device off
   PARKED,             // -> PARKED: the device is off (parked, or cut by hysteresis)
-  UNPARK,             // PARKED: asking for the device to be switched on
+  UNPARK,             // PARKED: the room is past the on threshold; switching the device on
   UNPARKED,           // PARKED -> IDLE: the device is on again
 };
 
@@ -84,6 +87,8 @@ inline const char *transition_to_string(Transition transition) {
       return "stopped early: the predicted peak reached the target";
     case Transition::STOPPED_SHARED:
       return "stopped: heat is arriving from other heads";
+    case Transition::STOPPED_HOLD:
+      return "stopped: past the off threshold";
     case Transition::UNREQUESTED_START:
       return "the unit started without a start decision";
     case Transition::PARK:
@@ -101,12 +106,12 @@ inline const char *transition_to_string(Transition transition) {
 struct StartConfig {
   // PID demand (output - target, C; mirrored when cooling) that starts a run.
   float start_threshold{0.5f};
-  // A parked head is switched back on at start_threshold - unpark_offset, so
-  // a room that needs heat can take the leak before starting a run of its own.
-  float unpark_offset{0.2f};
-  // Park while heat arrives from other heads and the room is within this of the target.
-  float park_margin{0.2f};
-  bool park_when_shared{false};
+  // Hysteresis band (C past the target in the direction of output): a parked
+  // head is switched back on once the room is on_threshold short of the
+  // target, and parked while heat arrives from other heads once the room is
+  // off_threshold past it.
+  float on_threshold{0.25f};
+  float off_threshold{0.5f};
   // The device's setpoint step.
   float step{0.5f};
   // Between a stop and the next start, and between power changes.
@@ -132,7 +137,9 @@ struct StartInput {
   bool room_rising{false};  // the room is moving the way output would move it
   bool shared_heat{false};  // heat (cooling) arriving from other heads
   float coast{0.0f};        // expected further move after a stop, >= 0
-  ParkHint hint{ParkHint::NONE};
+  // Hysteresis is holding: the room is past its off threshold and it is
+  // waiting out off_delay before switching the device off.
+  bool hold{false};
 };
 
 struct StartDecision {
@@ -150,7 +157,6 @@ class StartController {
   void configure(const StartConfig &config) { this->config_ = config; }
   const StartConfig &config() const { return this->config_; }
   void set_start_threshold(float value) { this->config_.start_threshold = value; }
-  void set_park_margin(float value) { this->config_.park_margin = value; }
 
   HeadState state() const { return this->state_; }
   // Time since the last stop, or since the device came on; UINT32_MAX if never.
@@ -195,12 +201,13 @@ class StartController {
       out.transition = Transition::UNPARKED;
     }
 
+    // How far the room is past the target in the direction of output.
+    const bool known = std::isfinite(in.room) && std::isfinite(in.target);
+    const float past = known ? sign * (in.room - in.target) : NAN;
+
     switch (this->state_) {
       case HeadState::PARKED: {
-        const float unpark_at = in.hint == ParkHint::PARK
-                                    ? this->config_.start_threshold
-                                    : this->config_.start_threshold - this->config_.unpark_offset;
-        const bool want_on = in.hint == ParkHint::UNPARK || in.demand >= unpark_at;
+        const bool want_on = known && -past > this->config_.on_threshold;
         if (want_on && this->power_change_allowed_(in.now_ms)) {
           out.power = PowerRequest::TURN_ON;
           out.transition = Transition::UNPARK;
@@ -216,11 +223,9 @@ class StartController {
           out.transition = Transition::UNREQUESTED_START;
           break;
         }
-        const bool near_target = std::isfinite(in.room) && std::isfinite(in.target) &&
-                                 sign * (in.room - in.target) >= -this->config_.park_margin;
-        const bool park = this->config_.park_when_shared && in.hint != ParkHint::UNPARK &&
-                          (in.hint == ParkHint::PARK || (in.shared_heat && near_target));
-        if (park) {
+        // Heat from other heads won't stop while the head is powered: cut at
+        // the off threshold at once rather than waiting out off_delay.
+        if (in.shared_heat && known && past > this->config_.off_threshold) {
           if (this->power_change_allowed_(in.now_ms)) {
             out.power = PowerRequest::TURN_OFF;
             out.transition = Transition::PARK;
@@ -228,7 +233,7 @@ class StartController {
           break;
         }
         const bool start = in.demand >= this->config_.start_threshold && !in.shared_heat && !in.room_rising &&
-                           in.hint != ParkHint::PARK && std::isfinite(view) &&
+                           !in.hold && std::isfinite(view) &&
                            this->since_stop_ms(in.now_ms) >= this->config_.min_cycle_ms;
         if (start) {
           this->state_ = HeadState::START;
@@ -239,7 +244,12 @@ class StartController {
         break;
       }
       case HeadState::START:
-        if (in.operating) {
+        if (in.hold) {
+          this->state_ = HeadState::IDLE;
+          this->note_stop_(in.now_ms);
+          this->stop_cmd_ms_ = in.now_ms;
+          out.transition = Transition::STOPPED_HOLD;
+        } else if (in.operating) {
           this->state_ = HeadState::RUN;
           out.transition = Transition::RUNNING;
         } else if (static_cast<uint32_t>(in.now_ms - this->start_ms_) >= this->config_.start_timeout_ms) {
@@ -255,10 +265,16 @@ class StartController {
           out.transition = Transition::STOPPED_BY_UNIT;
           break;
         }
+        if (in.hold) {
+          this->state_ = HeadState::IDLE;
+          this->note_stop_(in.now_ms);
+          this->stop_cmd_ms_ = in.now_ms;
+          out.transition = Transition::STOPPED_HOLD;
+          break;
+        }
         const bool ran_long_enough =
             static_cast<uint32_t>(in.now_ms - this->start_ms_) >= this->config_.min_run_ms;
-        const bool peak_reaches_target = std::isfinite(in.room) && std::isfinite(in.target) &&
-                                         sign * (in.room - in.target) + in.coast >= 0.0f;
+        const bool peak_reaches_target = known && past + in.coast >= 0.0f;
         if (ran_long_enough && peak_reaches_target) {
           this->state_ = HeadState::IDLE;
           this->note_stop_(in.now_ms);

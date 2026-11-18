@@ -3,12 +3,11 @@
     "step": {
       "user": {
         "title": "Heads on one outdoor unit",
-        "description": "Pick the climate_adaptivepid climates that share one outdoor unit, and the rooms that should receive hints. Hinted heads need start control and the shared_heat and request_park ESPHome actions.",
+        "description": "Pick the climate_adaptivepid climates that share one outdoor unit, and the rooms that should receive hints. Hinted heads need start control and the shared_heat ESPHome action.",
         "data": {
           "name": "Name",
           "heads": "Heads on the outdoor unit",
-          "hinted": "Rooms that receive hints",
-          "park_margin": "Park within this of the target"
+          "hinted": "Rooms that receive hints"
         }
       }
     },
@@ -25,8 +24,7 @@
       "init": {
         "data": {
           "heads": "Heads on the outdoor unit",
-          "hinted": "Rooms that receive hints",
-          "park_margin": "Park within this of the target"
+          "hinted": "Rooms that receive hints"
         }
       }
     },
@@ -49,8 +47,6 @@
         "state": {
           "none": "None",
           "shared_heat": "Shared heat",
-          "park": "Park",
-          "unpark": "Unpark",
           "disabled": "Disabled"
         }
       }

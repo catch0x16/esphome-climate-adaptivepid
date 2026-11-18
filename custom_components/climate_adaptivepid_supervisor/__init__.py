@@ -1,7 +1,7 @@
 """Supervisor for climate_adaptivepid heads that share one outdoor unit.
 
-Coordination only: it sends expiring hints (shared heat, park/unpark) to the
-heads through their ESPHome actions. Every head keeps working on its own when
+Coordination only: it sends an expiring shared-heat hint to the heads through
+their ESPHome action. Every head keeps working on its own when
 the supervisor is stopped; the hints simply expire. See
 docs/supervisor-design.md in esphome-climate-adaptivepid.
 """
