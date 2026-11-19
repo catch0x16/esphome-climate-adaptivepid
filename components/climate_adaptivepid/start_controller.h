@@ -62,7 +62,7 @@ enum class Transition : uint8_t {
   START_TIMED_OUT,    // START -> IDLE: the unit never started
   STOPPED_BY_UNIT,    // RUN -> IDLE: the unit stopped by itself
   STOPPED_EARLY,      // RUN -> IDLE: the predicted peak reached the target
-  STOPPED_SHARED,     // RUN -> IDLE: heat started arriving from other heads
+  STOPPED_SHARED,     // START/RUN -> IDLE: heat started arriving from other heads
   STOPPED_HOLD,       // START/RUN -> IDLE: past the off threshold, hysteresis is holding
   UNREQUESTED_START,  // IDLE -> RUN: the unit started without a START
   PARK,               // IDLE: shared heat past the off threshold; switching the device off
@@ -116,8 +116,10 @@ struct StartConfig {
   float step{0.5f};
   // Between a stop and the next start, and between power changes.
   uint32_t min_cycle_ms{60000};
-  // A START the unit doesn't follow within this goes back to IDLE.
-  uint32_t start_timeout_ms{60000};
+  // A START the unit doesn't follow within this goes back to IDLE. The units
+  // can take minutes to act on a start (up to 4 min seen), so it is held well
+  // past that; a shorter hold gives up and retries from the stay-off level.
+  uint32_t start_timeout_ms{300000};
   // After a stop is commanded, the unit may report running for a while longer.
   uint32_t stop_grace_ms{60000};
   // A run is not stopped early before this; the room only starts to respond
@@ -252,6 +254,12 @@ class StartController {
         } else if (in.operating) {
           this->state_ = HeadState::RUN;
           out.transition = Transition::RUNNING;
+        } else if (in.shared_heat) {
+          // Heat from other heads arrived while the unit was still starting.
+          this->state_ = HeadState::IDLE;
+          this->note_stop_(in.now_ms);
+          this->stop_cmd_ms_ = in.now_ms;
+          out.transition = Transition::STOPPED_SHARED;
         } else if (static_cast<uint32_t>(in.now_ms - this->start_ms_) >= this->config_.start_timeout_ms) {
           this->state_ = HeadState::IDLE;
           this->note_stop_(in.now_ms);

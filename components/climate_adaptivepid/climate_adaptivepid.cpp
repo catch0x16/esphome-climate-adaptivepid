@@ -356,6 +356,7 @@ void ClimateAdaptivePID::setup() {
     if (this->start_control_) {
       workflow::start::StartConfig config;
       config.start_threshold = this->start_threshold_;
+      config.start_timeout_ms = this->start_timeout_ms_;
       config.on_threshold = this->hysteresis_on_;
       config.off_threshold = this->hysteresis_off_;
       config.min_cycle_ms = this->min_cycle_ms_;

@@ -67,6 +67,7 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // Start control (docs/start-control-design.md).
   void set_start_control(bool value) { this->start_control_ = value; }
   void set_start_threshold(float value) { this->start_threshold_ = value; }
+  void set_start_timeout(uint32_t value) { this->start_timeout_ms_ = value; }
   void set_pid_adaptive(bool value) { this->tuning_.adaptive = value; }
   void set_pid_response_time(uint32_t ms) { this->tuning_.response_time_s = ms / 1000.0f; }
   void set_pid_dead_time(uint32_t ms) { this->tuning_.dead_time_s = ms / 1000.0f; }
@@ -250,6 +251,7 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   float setpoint_deadband_{0.0f};
   bool start_control_{false};
   float start_threshold_{0.5f};
+  uint32_t start_timeout_ms_{300000};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
   float hysteresis_off_limit_{NAN};

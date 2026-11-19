@@ -72,7 +72,7 @@ climate:
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
 | `outdoor_temperature_sensor` | none | Outdoor temperature for the room model's heat loss. Without it heat loss is not learned and is left out of the heating and cooling rates. |
 | `humidity_sensor` | none | Room humidity. With start control it confirms heat arriving from other heads on a shared outdoor unit (warm supply air dries the room). |
-| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`, `start_threshold`; see [Start control](#start-control). |
+| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`, `start_threshold`, `start_timeout`; see [Start control](#start-control). |
 | `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. With `off_delay` (default `0s`) a room past `off_threshold` is first held: the PID is pulled to its least output (target minus `max_adjustment_under` while heating) with its integral frozen, and the device is switched off only if the room is still past the threshold after `off_delay`, or at once past `off_limit` (default `off_threshold` + 0.5). Room sensors near the unit read past the target for a few minutes after each run; the delay keeps those brief peaks from forcing a full power-on start. |
 
 At least one of `pid` and `hysteresis` is required. The standard climate
@@ -169,6 +169,11 @@ stretches powered and longer stretches parked.
 
 - `start_threshold` (default 0.5°C) must be below `max_adjustment_over`. Once a
   few runs are learned it follows the room: half the learned gain of a start.
+- `start_timeout` (default 5 min, 30 s to 15 min): how long a start is held
+  for the unit to start its compressor before going back to idle. These units
+  can take several minutes to act on a start; with a short timeout the
+  controller gives up, drops to the stay-off level and retries, and the unit
+  may never start. A start also ends if heat starts arriving from other heads.
 - Start control requires `hysteresis`.
 - Heat arriving from other heads is detected on the head itself (the room
   rising while the head is idle and past its own coast, with humidity falling

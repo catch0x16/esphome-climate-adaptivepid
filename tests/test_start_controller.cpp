@@ -136,6 +136,49 @@ int main() {
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "shared heat stops a run");
   }
   {
+    // Hailee's room 2026-11-18 19:27-19:34: the unit can take minutes to act on
+    // a start. The start is held, not dropped after a minute.
+    StartController c = make();
+    StartDecision d = c.update(idle_input(0, 0.6f));
+    check(d.state == HeadState::START, "slow start: starts");
+    d = c.update(idle_input(2 * MIN, 0.6f));
+    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "slow start: still held at the view after 2 min");
+    StartInput in = idle_input(4 * MIN, 0.6f);
+    in.device_view = 19.5f;  // the room kept falling
+    d = c.update(in);
+    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "slow start: held at the start view as the view falls");
+    in.now_ms = 4 * MIN + 10 * S;
+    in.operating = true;
+    d = c.update(in);
+    check(d.state == HeadState::RUN && d.transition == Transition::RUNNING, "slow start: runs when the unit starts at 4 min");
+  }
+  {
+    // The default hold ends after 5 min; a configured one at its own value.
+    StartController c = make();
+    c.update(idle_input(0, 0.6f));
+    StartDecision d = c.update(idle_input(5 * MIN - S, 0.6f));
+    check(d.state == HeadState::START, "start timeout: default holds to 5 min");
+    d = c.update(idle_input(5 * MIN, 0.6f));
+    check(d.state == HeadState::IDLE && d.transition == Transition::START_TIMED_OUT, "start timeout: default 5 min");
+    StartConfig cfg = c.config();
+    cfg.start_timeout_ms = 2 * MIN;
+    StartController short_hold;
+    short_hold.configure(cfg);
+    short_hold.update(idle_input(0, 0.6f));
+    d = short_hold.update(idle_input(2 * MIN, 0.6f));
+    check(d.transition == Transition::START_TIMED_OUT, "start timeout: configured value");
+  }
+  {
+    // Heat arriving from other heads ends a start the unit hasn't followed yet.
+    StartController c = make();
+    c.update(idle_input(0, 0.6f));
+    StartInput in = idle_input(2 * MIN, 0.6f);
+    in.shared_heat = true;
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "shared heat ends a start");
+    check(near(d.setpoint, 19.0f), "shared heat ends a start: idle setpoint");
+  }
+  {
     // Park and unpark on the hysteresis band.
     StartController c = make();
     StartInput in = idle_input(0, 0.0f);

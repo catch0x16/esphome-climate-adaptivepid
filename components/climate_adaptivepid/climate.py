@@ -31,6 +31,7 @@ CONF_MAX_ADJUSTMENT_OVER = "max_adjustment_over"
 CONF_SETPOINT_DEADBAND = "setpoint_deadband"
 CONF_START_CONTROL = "start_control"
 CONF_START_THRESHOLD = "start_threshold"
+CONF_START_TIMEOUT = "start_timeout"
 CONF_PARK_WHEN_SHARED = "park_when_shared"
 CONF_PARK_MARGIN = "park_margin"
 
@@ -95,6 +96,12 @@ PID_SCHEMA = cv.Schema(
         # room's response once there are enough runs.
         cv.Optional(CONF_START_THRESHOLD, default=0.5): cv.float_range(
             min=0.1, max=3.0
+        ),
+        # How long a start is held for the unit to start its compressor before
+        # going back to idle. The units can take minutes to act on a start.
+        cv.Optional(CONF_START_TIMEOUT, default="5min"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(seconds=30), max=cv.TimePeriod(minutes=15)),
         ),
         # Parking follows the hysteresis band under start control: the head is
         # switched off past off_threshold (at once while heat arrives from other
@@ -343,6 +350,7 @@ async def to_code(config):
         cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
         cg.add(var.set_start_control(conf[CONF_START_CONTROL]))
         cg.add(var.set_start_threshold(conf[CONF_START_THRESHOLD]))
+        cg.add(var.set_start_timeout(conf[CONF_START_TIMEOUT]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))
