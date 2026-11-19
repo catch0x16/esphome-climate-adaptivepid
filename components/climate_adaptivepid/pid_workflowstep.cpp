@@ -180,6 +180,18 @@ namespace workflow {
 
         bool PidWorkflowStep::sharedHeat() const { return this->detector.active(esphome::millis()); }
 
+        void PidWorkflowStep::setSharedHeatExpected(int32_t expectedInS, uint32_t validMs) {
+            this->detector.set_expected_hint(expectedInS, esphome::millis(), validMs);
+            if (expectedInS >= 0) {
+                ESP_LOGI(TAG, "Supervisor: shared heat expected in %d s (for %u s)", static_cast<int>(expectedInS),
+                    static_cast<unsigned>(validMs / 1000));
+            } else {
+                ESP_LOGI(TAG, "Supervisor: no shared heat expected");
+            }
+        }
+
+        float PidWorkflowStep::sharedHeatExpectedIn() const { return this->detector.expected_in_s(esphome::millis()); }
+
         void PidWorkflowStep::runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager) {
             using namespace workflow::start;
             const uint32_t now = esphome::millis();
@@ -235,6 +247,7 @@ namespace workflow {
             in.demand = demand;
             in.room_rising = this->detector.rising(now);
             in.shared_heat = shared;
+            in.shared_expected_s = this->detector.expected_in_s(now);
             in.coast = this->bursts.coast(shared);
             in.hold = this->holdLeast && powered;
             const StartDecision decision = this->startCtl.update(in);
@@ -267,9 +280,9 @@ namespace workflow {
                     }
                     break;
             }
-            ESP_LOGD(TAG, "Start control %s: demand %.2f (start %.2f), setpoint %.1f, room %s, shared heat %s",
+            ESP_LOGD(TAG, "Start control %s: demand %.2f (start %.2f), setpoint %.1f, room %s, shared heat %s, expected in %.0f s",
                 head_state_to_string(decision.state), demand, startThreshold, decision.setpoint,
-                in.room_rising ? "rising" : "steady", YESNO(shared));
+                in.room_rising ? "rising" : "steady", YESNO(shared), in.shared_expected_s);
         }
 
     }

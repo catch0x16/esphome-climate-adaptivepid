@@ -13,11 +13,21 @@ For each room that receives hints, shared heat is on while any *other* head in
 the group is operating; the room's own run never counts. The head decides what
 to do with it: it starts no run of its own while shared heat is on, and parks
 (switches off) at once once its room is past its hysteresis off_threshold.
+
+Shared heat can also be forecast. A head that is not under start control
+starts at a fairly steady deficit below its target (the primary bedroom:
+0.22-0.37 C, median 0.32), so its next start is predicted from its room
+temperature and how fast it is falling. A hinted room is told when another
+head is expected to start, so it can wait for that heat instead of starting a
+run that stacks on top of it. Runs also delay each other: a bedroom's run
+warms the other bedroom and pushes its start back by several minutes.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
+import statistics
 
 
 @dataclass(frozen=True)
@@ -28,6 +38,9 @@ class Head:
     operating: bool | None = None
     # "heat", "cool" or anything else (no hints outside heat and cool).
     mode: str | None = None
+    # The room temperature the head regulates, and its target.
+    room: float | None = None
+    target: float | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +49,74 @@ class RoomPlan:
 
     shared_heat: bool
     reason: str
+    # Seconds until another head is predicted to start; None when none is due
+    # within the forecast window (or one is already running).
+    expected_in_s: int | None = None
+
+
+# How many recent starts a head's start deficit is learned from, and how many
+# it needs before it is predicted at all.
+START_HISTORY = 8
+MIN_STARTS = 4
+# The fall rate is measured over this, from samples at least this far apart.
+SLOPE_WINDOW_S = 300.0
+# No forecast in the first minutes after a stop (the room is still coasting).
+AFTER_STOP_S = 180.0
+# A fall slower than this (C/s, ~0.006 C/min) gives no forecast.
+MIN_FALL_PER_S = 0.0001
+# Past the start level by more than this, the forecast is dropped as wrong.
+OVERDUE_MARGIN = 0.15
+# Forecasts further out than this are not sent.
+EXPECT_WINDOW_S = 300
+
+
+@dataclass
+class StartPredictor:
+    """Learns where one head starts, and forecasts its next start."""
+
+    deficits: deque[float] = field(default_factory=lambda: deque(maxlen=START_HISTORY))
+    samples: deque[tuple[float, float]] = field(default_factory=deque)
+    operating: bool | None = None
+    last_stop: float | None = None
+
+    def observe(self, now: float, head: Head) -> None:
+        """Called on every state change and renewal with the head's state."""
+        heating = head.mode == "heat"
+        if head.operating and self.operating is False and head.room is not None and head.target is not None:
+            sign = 1.0 if heating else -1.0
+            self.deficits.append(sign * (head.target - head.room))
+        if not head.operating and self.operating:
+            self.last_stop = now
+        if head.operating is not None:
+            self.operating = head.operating
+        if head.room is not None:
+            if not self.samples or now - self.samples[-1][0] >= 1.0:
+                self.samples.append((now, head.room))
+            while self.samples and now - self.samples[0][0] > 2 * SLOPE_WINDOW_S:
+                self.samples.popleft()
+
+    def expected_in_s(self, now: float, head: Head) -> float | None:
+        """Seconds until the head is predicted to start, or None."""
+        if head.operating or head.mode not in ("heat", "cool") or head.room is None or head.target is None:
+            return None
+        if len(self.deficits) < MIN_STARTS:
+            return None
+        if self.last_stop is not None and now - self.last_stop < AFTER_STOP_S:
+            return None
+        sign = 1.0 if head.mode == "heat" else -1.0
+        level = head.target - sign * statistics.median(self.deficits)
+        # How far the room still has to go, in the direction it drifts.
+        to_go = sign * (head.room - level)
+        if to_go <= 0.0:
+            return 0.0 if -to_go <= OVERDUE_MARGIN else None
+        old = [(t, room) for t, room in self.samples if now - t >= SLOPE_WINDOW_S]
+        if not old:
+            return None
+        then_t, then_room = old[-1]  # the newest sample at least SLOPE_WINDOW_S old
+        fall = sign * (then_room - head.room) / (now - then_t)
+        if fall < MIN_FALL_PER_S:
+            return None
+        return to_go / fall
 
 
 def outdoor_unit_running(heads: dict[str, Head]) -> bool:
@@ -43,22 +124,41 @@ def outdoor_unit_running(heads: dict[str, Head]) -> bool:
     return any(head.operating for head in heads.values())
 
 
-def plan_room(name: str, heads: dict[str, Head]) -> RoomPlan | None:
-    """The hint for one room, or None when nothing should be sent."""
+def plan_room(
+    name: str, heads: dict[str, Head], expected: dict[str, float | None] | None = None
+) -> RoomPlan | None:
+    """The hint for one room, or None when nothing should be sent.
+
+    `expected` holds each head's forecast start (seconds), if any.
+    """
     head = heads.get(name)
     if head is None or head.mode not in ("heat", "cool"):
         return None
     running = sorted(other.name for key, other in heads.items() if key != name and other.operating)
-    if not running:
-        return RoomPlan(shared_heat=False, reason="no other head running")
-    return RoomPlan(shared_heat=True, reason=f"{', '.join(running)} running")
+    if running:
+        return RoomPlan(shared_heat=True, reason=f"{', '.join(running)} running")
+    due = [
+        (seconds, heads[key].name)
+        for key, seconds in (expected or {}).items()
+        if key != name and key in heads and seconds is not None and seconds <= EXPECT_WINDOW_S
+    ]
+    if due:
+        seconds, who = min(due)
+        return RoomPlan(
+            shared_heat=False,
+            reason=f"{who} expected to start in {round(seconds)} s",
+            expected_in_s=int(round(seconds)),
+        )
+    return RoomPlan(shared_heat=False, reason="no other head running")
 
 
-def plan(heads: dict[str, Head], hinted: list[str]) -> dict[str, RoomPlan]:
+def plan(
+    heads: dict[str, Head], hinted: list[str], expected: dict[str, float | None] | None = None
+) -> dict[str, RoomPlan]:
     """The hints for every hinted room that should get one."""
     plans: dict[str, RoomPlan] = {}
     for name in hinted:
-        room_plan = plan_room(name, heads)
+        room_plan = plan_room(name, heads, expected)
         if room_plan is not None:
             plans[name] = room_plan
     return plans

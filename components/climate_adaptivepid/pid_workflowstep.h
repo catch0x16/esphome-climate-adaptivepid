@@ -93,6 +93,11 @@ namespace workflow {
             void resetBurstState() { this->bursts.reset(); }
             // Supervisor hint; it expires after valid_ms.
             void setSharedHeatHint(bool active, uint32_t validMs);
+            // Supervisor forecast: heat from other heads expected in
+            // expectedInS (negative clears it); it expires after validMs.
+            void setSharedHeatExpected(int32_t expectedInS, uint32_t validMs);
+            // Seconds until heat from other heads is expected; NaN when none.
+            float sharedHeatExpectedIn() const;
             // Start from a model state. A restored rate was learned before the
             // last reboot; a seeded one keeps the configured ki until that
             // mode's first measurement.

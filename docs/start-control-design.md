@@ -59,18 +59,21 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 
 | From → to | Trigger | Action |
 |---|---|---|
-| IDLE → START | demand ≥ `start_threshold`, **and** no shared heat, **and** the room isn't rising (≥ 0.02 °C/min over 2 min), **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding | setpoint = view |
+| IDLE → START | demand ≥ `start_threshold`, **and** no shared heat, **and** the room isn't rising (≥ 0.02 °C/min over 2 min), **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding, **and** not deferred (below) | setpoint = view |
+| IDLE (deferred) | a start is due, **but** the supervisor forecasts shared heat within 5 min, **and** the room is less than 0.5 short of the target, **and** the deferral has lasted less than 6 min | no start; integral frozen. Ends when the heat arrives, the forecast is dropped, at the 0.5 floor, or after 6 min |
 | START → RUN | the unit has reported `operating` for 60 s without a break (right after power-on a unit can report running for ~20 s and stop; until confirmed the start setpoint stays and the start doesn't time out while the unit reports running) | setpoint = view at start − 1 step |
 | START → IDLE | no `operating` within `start_timeout` (default 5 min) | idle setpoint |
 | START → IDLE | shared heat starts | idle setpoint |
 | RUN → IDLE | the unit stops by itself | idle setpoint |
 | RUN → IDLE (early stop) | at least 2 minutes running, **and** room + learned coast ≥ target | idle setpoint (the unit stops within 10 s) |
 | RUN → IDLE | shared heat starts | idle setpoint |
+| RUN → IDLE | at least 2 minutes running, **and** shared heat forecast within 2 min | idle setpoint |
 | IDLE → RUN | the unit runs without a START, more than 60 s after the last commanded stop | tracked as a run (logged as unrequested) |
 | START/RUN → IDLE | hysteresis is holding (room past `off_threshold`, waiting out `off_delay`) | idle setpoint |
 | IDLE → PARKED | shared heat **and** room > target + `off_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device off (at once, no `off_delay`) |
 | any → PARKED | the device is off (parked, or cut by hysteresis after `off_delay` / past `off_limit`) | — |
 | PARKED → IDLE | room < target − `on_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device on at the idle setpoint, never the target |
+| PARKED → IDLE (catch) | room more than 0.1 short of the target, **and** shared heat arriving or forecast within 5 min, **and** ≥ `min_cycle_duration` since the last power change | switch the device on, so its fan brings in the other head's heat |
 
 **Demand** is the PID's output minus the target (target minus output when cooling): how much more output the PID asks for. Because it includes the integral, a room that has been below target for a long time starts sooner.
 
@@ -162,8 +165,9 @@ The climate exposes one method, called from an ESPHome action in the device YAML
 | Method | Effect |
 |---|---|
 | `set_shared_heat_hint(active, valid_for_s)` | Replaces the local shared-heat detector while valid |
+| `set_shared_heat_expected(expected_in_s, valid_for_s)` | Forecast: another head is predicted to start in `expected_in_s` (counted down on the head; negative clears it). Defers starts, switches a parked head on to catch the heat, and stops a run early (see [Transitions](#transitions)). There is no local forecast |
 
-The head makes every power decision itself; the hint only tells it, for certain, whether another head is running. The [`climate_adaptivepid_supervisor`](../custom_components/climate_adaptivepid_supervisor) integration sends it; see [supervisor-design.md](supervisor-design.md).
+The head makes every power decision itself; the hints only tell it, for certain, whether another head is running, and when one is expected to. The [`climate_adaptivepid_supervisor`](../custom_components/climate_adaptivepid_supervisor) integration sends it; see [supervisor-design.md](supervisor-design.md).
 
 ## Independence
 

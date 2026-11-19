@@ -85,6 +85,21 @@ int main() {
     check(!d.active(6 * MIN + 5 * S), "hint: inactive");
   }
 
+  {
+    // The supervisor's forecast counts down and expires; negative clears it.
+    SharedHeatDetector d;
+    check(std::isnan(d.expected_in_s(0)), "expected: none without a forecast");
+    d.set_expected_hint(200, 10 * S, 120 * S);
+    check(std::fabs(d.expected_in_s(10 * S) - 200.0f) < 0.01f, "expected: as sent");
+    check(std::fabs(d.expected_in_s(70 * S) - 140.0f) < 0.01f, "expected: counts down");
+    d.set_expected_hint(30, 70 * S, 120 * S);
+    check(d.expected_in_s(130 * S) == 0.0f, "expected: 0 once due");
+    check(std::isnan(d.expected_in_s(190 * S)), "expected: expires after valid_for");
+    d.set_expected_hint(100, 200 * S, 120 * S);
+    d.set_expected_hint(-1, 210 * S, 120 * S);
+    check(std::isnan(d.expected_in_s(210 * S)), "expected: negative clears it");
+    check(!d.active(210 * S), "expected: a forecast is not shared heat");
+  }
   std::printf("%s\n", failures == 0 ? "all passed" : "FAILURES");
   return failures == 0 ? 0 : 1;
 }

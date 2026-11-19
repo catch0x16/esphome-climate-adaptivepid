@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import SupervisorConfigEntry
 from .entity import SupervisorEntity, room_key
 
-ACTIONS = ["none", "shared_heat", "disabled"]
+ACTIONS = ["none", "shared_heat", "shared_heat_expected", "disabled"]
 
 
 async def async_setup_entry(
@@ -36,11 +36,19 @@ class SupervisorAction(SupervisorEntity, SensorEntity):
         if not self.coordinator.enabled:
             return "disabled"
         room_plan = self.coordinator.plans.get(self._climate)
-        if room_plan is None or not room_plan.shared_heat:
+        if room_plan is None:
             return "none"
-        return "shared_heat"
+        if room_plan.shared_heat:
+            return "shared_heat"
+        if room_plan.expected_in_s is not None:
+            return "shared_heat_expected"
+        return "none"
 
     @property
-    def extra_state_attributes(self) -> dict[str, str]:
+    def extra_state_attributes(self) -> dict[str, str | int | None]:
         room_plan = self.coordinator.plans.get(self._climate)
-        return {"reason": room_plan.reason if room_plan else "room not in heat or cool", "climate": self._climate}
+        return {
+            "reason": room_plan.reason if room_plan else "room not in heat or cool",
+            "climate": self._climate,
+            "expected_in_s": room_plan.expected_in_s if room_plan else None,
+        }

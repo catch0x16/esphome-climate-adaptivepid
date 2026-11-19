@@ -47,6 +47,7 @@
         "state": {
           "none": "None",
           "shared_heat": "Shared heat",
+          "shared_heat_expected": "Shared heat expected",
           "disabled": "Disabled"
         }
       }

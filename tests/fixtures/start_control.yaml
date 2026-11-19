@@ -32,6 +32,7 @@ esphome:
       - delay: 8s
       - logger.log: "STEP 4: no shared heat, room 20.9 (inside the band) -> stays off"
       - lambda: id(outer).set_shared_heat_hint(false, 120);
+      - lambda: id(outer).set_shared_heat_expected(-1, 120);
       - globals.set:
           id: room
           value: "20.9"

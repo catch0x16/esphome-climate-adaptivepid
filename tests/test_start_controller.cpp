@@ -255,6 +255,101 @@ int main() {
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "confirm: shared heat ends an unconfirmed run");
   }
   {
+    // Riding the primary bedroom: Hailee's room 0.28 short of target wants a
+    // start, but the primary is forecast to start in 2 min. Wait for it.
+    StartController c = make();
+    StartInput in = idle_input(0, 0.6f);
+    in.shared_expected_s = 120.0f;
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::DEFERRED, "defer: start held off for expected heat");
+    check(d.freeze_integral, "defer: integral frozen while waiting");
+    check(near(d.setpoint, 19.0f), "defer: idle setpoint");
+    in.now_ms = 60 * S;
+    d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::NONE, "defer: logged once");
+    // The heat came: no start, and the deferral is over.
+    in.now_ms = 2 * MIN;
+    in.shared_heat = true;
+    in.shared_expected_s = NAN;
+    d = c.update(in);
+    check(d.state == HeadState::IDLE && !d.freeze_integral, "defer: ends when the heat arrives");
+  }
+  {
+    // A deferral ends at the floor, at defer_max, and when the forecast goes.
+    StartController c = make();
+    StartInput in = idle_input(0, 0.6f);
+    in.shared_expected_s = 60.0f;
+    c.update(in);
+    in.now_ms = 2 * MIN;
+    in.room = 19.75f;  // 0.53 short: past the 0.5 floor
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::START, "defer: starts anyway past the floor");
+
+    StartController m = make();
+    in = idle_input(0, 0.6f);
+    in.shared_expected_s = 0.0f;  // forecast overdue, the primary never starts
+    m.update(in);
+    in.now_ms = 6 * MIN - S;
+    check(m.update(in).state == HeadState::IDLE, "defer: still waiting before defer_max");
+    in.now_ms = 6 * MIN;
+    check(m.update(in).state == HeadState::START, "defer: starts anyway at defer_max");
+
+    StartController g = make();
+    in = idle_input(0, 0.6f);
+    in.shared_expected_s = 200.0f;
+    g.update(in);
+    in.now_ms = 60 * S;
+    in.shared_expected_s = NAN;
+    check(g.update(in).state == HeadState::START, "defer: starts once the forecast is dropped");
+
+    StartController far = make();
+    in = idle_input(0, 0.6f);
+    in.shared_expected_s = 400.0f;  // beyond the 5 min window
+    check(far.update(in).state == HeadState::START, "defer: a forecast beyond the window doesn't defer");
+  }
+  {
+    // A parked head below target switches on to take expected heat, before
+    // its own on_threshold; not when at target.
+    StartController c = make();
+    StartInput in = idle_input(0, 0.0f);
+    in.powered = false;
+    in.room = 20.15f;  // 0.13 short: inside the band (on at 0.25)
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::PARKED && d.power == PowerRequest::NONE, "catch: parked inside the band");
+    in.now_ms = 2 * MIN;
+    in.shared_expected_s = 90.0f;
+    d = c.update(in);
+    check(d.power == PowerRequest::TURN_ON && d.transition == Transition::CATCH, "catch: switched on for expected heat");
+    StartController a = make();
+    in = idle_input(0, 0.0f);
+    in.powered = false;
+    in.room = 20.25f;  // 0.03 short: close enough
+    a.update(in);
+    in.now_ms = 2 * MIN;
+    in.shared_heat = true;
+    check(a.update(in).power == PowerRequest::NONE, "catch: not when at target");
+  }
+  {
+    // A run stops after min_run once the primary is forecast within 2 min.
+    StartController c = make();
+    c.update(idle_input(0, 0.6f));
+    StartInput in = idle_input(10 * S, 0.6f);
+    in.operating = true;
+    in.room = 19.7f;
+    in.coast = 0.0f;
+    c.update(in);
+    in.now_ms = 60 * S;
+    in.shared_expected_s = 60.0f;
+    check(c.update(in).state == HeadState::RUN, "expected stop: not before the minimum run");
+    in.now_ms = 2 * MIN + 10 * S;
+    in.shared_expected_s = 180.0f;
+    check(c.update(in).state == HeadState::RUN, "expected stop: a forecast beyond 2 min doesn't stop it");
+    in.now_ms = 2 * MIN + 20 * S;
+    in.shared_expected_s = 100.0f;
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_EXPECTED, "expected stop: stopped for expected heat");
+  }
+  {
     // Park and unpark on the hysteresis band.
     StartController c = make();
     StartInput in = idle_input(0, 0.0f);

@@ -69,6 +69,26 @@ class SharedHeatDetector {
     return this->has_hint_ && static_cast<uint32_t>(now_ms - this->hint_from_ms_) < this->hint_valid_ms_;
   }
 
+  // The supervisor's forecast: heat from other heads expected in expected_in_s
+  // (another head is predicted to start), valid for valid_ms from now. A
+  // negative expected_in_s clears it. There is no local forecast.
+  void set_expected_hint(int32_t expected_in_s, uint32_t now_ms, uint32_t valid_ms) {
+    this->has_expected_ = expected_in_s >= 0 && valid_ms > 0;
+    this->expected_s_ = expected_in_s;
+    this->expected_from_ms_ = now_ms;
+    this->expected_valid_ms_ = valid_ms;
+  }
+  // Seconds until heat from other heads is expected (0 once due); NaN without
+  // a valid forecast.
+  float expected_in_s(uint32_t now_ms) const {
+    const uint32_t elapsed = now_ms - this->expected_from_ms_;
+    if (!this->has_expected_ || elapsed >= this->expected_valid_ms_) {
+      return NAN;
+    }
+    const float left = static_cast<float>(this->expected_s_) - static_cast<float>(elapsed) / 1000.0f;
+    return left > 0.0f ? left : 0.0f;
+  }
+
   bool local() const { return this->local_; }
   bool active(uint32_t now_ms) const { return this->hint_valid(now_ms) ? this->hint_ : this->local_; }
 
@@ -156,6 +176,10 @@ class SharedHeatDetector {
   bool hint_{false};
   uint32_t hint_from_ms_{0};
   uint32_t hint_valid_ms_{0};
+  bool has_expected_{false};
+  int32_t expected_s_{-1};
+  uint32_t expected_from_ms_{0};
+  uint32_t expected_valid_ms_{0};
 };
 
 }  // namespace start

@@ -17,6 +17,9 @@ RENEW_SECONDS = 60
 
 # ESPHome actions defined in the heads' YAML (api: actions:).
 ACTION_SHARED_HEAT = "shared_heat"
+# Forecast: another head is expected to start in expected_in_s (-1 clears it).
+# Optional on the head; a head without it gets shared_heat only.
+ACTION_SHARED_HEAT_EXPECTED = "shared_heat_expected"
 
 # The climate_adaptivepid diagnostic entity that reports the unit running.
 OPERATING_NAME = "Operating"

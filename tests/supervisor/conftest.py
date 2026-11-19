@@ -49,8 +49,9 @@ class FakeHouse:
     def set_operating(self, key: str, on: bool) -> None:
         self.hass.states.async_set(self.heads[key].operating, "on" if on else "off")
 
-    def calls(self, key: str) -> list[tuple[str, dict]]:
-        return self.heads[key].calls
+    def calls(self, key: str, action: str = "shared_heat") -> list[tuple[str, dict]]:
+        """One action's calls to a head (shared_heat by default)."""
+        return [call for call in self.heads[key].calls if call[0] == action]
 
 
 @pytest.fixture
@@ -81,6 +82,7 @@ async def house(hass: HomeAssistant) -> FakeHouse:
             return handler
 
         hass.services.async_register("esphome", f"{node}_shared_heat", make_handler())
+        hass.services.async_register("esphome", f"{node}_shared_heat_expected", make_handler())
     house = FakeHouse(hass=hass, heads=heads)
     for key in heads:
         house.set_climate(key)

@@ -275,6 +275,14 @@ void ClimateAdaptivePID::set_shared_heat_hint(bool active, uint32_t valid_for_s)
   this->pid_step_->setSharedHeatHint(active, valid_for_s * 1000U);
 }
 
+void ClimateAdaptivePID::set_shared_heat_expected(int32_t expected_in_s, uint32_t valid_for_s) {
+  if (this->pid_step_ == nullptr || !this->pid_step_->isStartControl()) {
+    ESP_LOGW(TAG, "set_shared_heat_expected: start control is not enabled");
+    return;
+  }
+  this->pid_step_->setSharedHeatExpected(expected_in_s, valid_for_s * 1000U);
+}
+
 void ClimateAdaptivePID::reset_tuning() {
   if (this->pid_step_ == nullptr || !this->pid_step_->isAdaptive()) {
     ESP_LOGW(TAG, "reset_tuning: adaptive PID tuning is not enabled");

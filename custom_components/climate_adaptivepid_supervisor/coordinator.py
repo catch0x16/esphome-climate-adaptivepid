@@ -13,19 +13,24 @@ from homeassistant.const import STATE_ON
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
     ACTION_SHARED_HEAT,
+    ACTION_SHARED_HEAT_EXPECTED,
     CONF_HEADS,
     CONF_HINTED,
     OPERATING_NAME,
     RENEW_SECONDS,
     SHARED_HEAT_VALID_SECONDS,
 )
-from .logic import Head, RoomPlan, outdoor_unit_running, plan
+from .logic import Head, RoomPlan, StartPredictor, outdoor_unit_running, plan
 
 _LOGGER = logging.getLogger(__name__)
+
+# Nothing sent to a room yet.
+_UNSENT = object()
 
 
 @dataclass
@@ -81,6 +86,10 @@ class SupervisorCoordinator:
         self.outdoor_running = False
         self.plans: dict[str, RoomPlan] = {}
         self._sent: dict[str, bool] = {}
+        # The forecast last sent to each room (None: cleared).
+        self._sent_expected: dict[str, object] = {}
+        self._no_expected_action: set[str] = set()
+        self.predictors: dict[str, StartPredictor] = {}
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
 
@@ -116,6 +125,7 @@ class SupervisorCoordinator:
     async def async_set_enabled(self, enabled: bool) -> None:
         self.enabled = enabled
         self._sent.clear()
+        self._sent_expected.clear()
         await self.async_update(renew=True)
 
     def snapshot(self) -> dict[str, Head]:
@@ -127,6 +137,8 @@ class SupervisorCoordinator:
                 name=state.name if state is not None else climate,
                 operating=operating_state is not None and operating_state.state == STATE_ON,
                 mode=state.state if state is not None else None,
+                room=_float_attr(state, "current_temperature"),
+                target=_float_attr(state, "temperature"),
             )
         return heads
 
@@ -138,11 +150,18 @@ class SupervisorCoordinator:
 
     async def async_update(self, renew: bool) -> None:
         heads = self.snapshot()
+        now = dt_util.utcnow().timestamp()
+        expected: dict[str, float | None] = {}
+        for climate, head in heads.items():
+            predictor = self.predictors.setdefault(climate, StartPredictor())
+            predictor.observe(now, head)
+            expected[climate] = predictor.expected_in_s(now, head)
         self.outdoor_running = outdoor_unit_running(heads)
-        self.plans = plan(heads, self.hinted)
+        self.plans = plan(heads, self.hinted, expected)
         if self.enabled:
             for climate, room_plan in self.plans.items():
                 await self._send(climate, room_plan, renew)
+                await self._send_expected(climate, room_plan, renew)
         for listener in list(self._listeners):
             listener()
 
@@ -169,3 +188,48 @@ class SupervisorCoordinator:
         if changed:
             _LOGGER.info("%s: %s", climate, room_plan.reason)
             async_log_entry(self.hass, "Supervisor", room_plan.reason, domain=DOMAIN, entity_id=climate)
+
+    async def _send_expected(self, climate: str, room_plan: RoomPlan, renew: bool) -> None:
+        """The forecast: sent when it appears or clears, and renewed every minute."""
+        node = self.entities[climate].node
+        if node is None:
+            return
+        service = f"{node}_{ACTION_SHARED_HEAT_EXPECTED}"
+        if not self.hass.services.has_service("esphome", service):
+            if climate not in self._no_expected_action:
+                self._no_expected_action.add(climate)
+                _LOGGER.warning("%s: no esphome.%s action; forecasts are not sent to it", climate, service)
+            return
+        self._no_expected_action.discard(climate)
+        value = room_plan.expected_in_s
+        previous = self._sent_expected.get(climate, _UNSENT)
+        # A new forecast or a cleared one goes out at once; a changed countdown
+        # waits for the renewal (the head counts down by itself).
+        changed = previous is _UNSENT or (previous is None) != (value is None)
+        if not changed and not renew:
+            return
+        try:
+            await self.hass.services.async_call(
+                "esphome",
+                service,
+                {"expected_in_s": -1 if value is None else value, "valid_for_s": SHARED_HEAT_VALID_SECONDS},
+                blocking=True,
+            )
+        except Exception as err:  # noqa: BLE001 - a head offline must not stop the others
+            _LOGGER.warning("%s: could not send the forecast to %s: %s", climate, node, err)
+            self._sent_expected.pop(climate, None)
+            return
+        self._sent_expected[climate] = value
+        if changed and value is not None:
+            _LOGGER.info("%s: %s", climate, room_plan.reason)
+            async_log_entry(self.hass, "Supervisor", room_plan.reason, domain=DOMAIN, entity_id=climate)
+
+
+def _float_attr(state, name: str) -> float | None:
+    if state is None:
+        return None
+    try:
+        value = state.attributes.get(name)
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None

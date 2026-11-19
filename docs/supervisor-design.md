@@ -42,6 +42,11 @@ For each head, the integration finds its `Operating` binary sensor and its ESPHo
 |---|---|
 | None operating | `shared_heat` off |
 | Any operating | `shared_heat` on |
+| None operating, another predicted to start within 5 min | `shared_heat` off, `shared_heat_expected` in seconds |
+
+**Forecast.** The primary bedroom isn't under start control and starts at a steady deficit below its target (0.22–0.37 °C, median 0.32, over 62 starts). For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. The history is in memory, so after a Home Assistant restart forecasts resume after 4 starts.
+
+Why it helps: each primary run warms Hailee's room by about 0.7–0.9 °C while her head is powered, more than the 0.3 she starts a run at, and her runs warm the primary's room in turn, pushing its start back by about 9 minutes (2026-11-17..19). Hailee's starts came 0.5–3.3 min before a primary start 8 times out of 19 on 2026-11-18/19, so the two runs stacked.
 
 Park and unpark requests were removed in 0.2.0: the head parks on its own hysteresis band (see [start-control-design.md](start-control-design.md#transitions)), so the supervisor no longer needs a margin of its own. A `park_margin` saved by 0.1 is ignored.
 
@@ -50,7 +55,7 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 **Sending** (`coordinator.py`):
 - **When:** on any change of the heads' climate or `Operating` states, and renewed every 60 s.
 - **Expiry:** the hint is valid for 120 s, so a stopped supervisor leaves the heads alone within 2 minutes.
-- **Calls:** `esphome.<node>_shared_heat`.
+- **Calls:** `esphome.<node>_shared_heat`, and `esphome.<node>_shared_heat_expected` (`expected_in_s`, −1 clears it) when the head defines it. A new or cleared forecast goes out at once; the countdown is renewed every minute.
 - **Failures:** a failed call (head offline) is logged and skipped; the other heads are unaffected.
 - **Logbook:** every change of hints is written to the logbook against the room's climate.
 
@@ -61,18 +66,18 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - `binary_sensor.<name>_outdoor_unit_running`: diagnostic, any head operating.
 - Per hinted room:
   - `binary_sensor.<name>_<room>_shared_heat`: other heads only.
-  - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat` or `disabled`, with the reason as an attribute.
+  - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat`, `shared_heat_expected` or `disabled`, with the reason and `expected_in_s` as attributes.
 
 **Tests** (`tests/supervisor/`, run with `pytest-homeassistant-custom-component` in an isolated environment, see the README):
 - **The decision rules.**
 - **The hint lifecycle:** sent when another head starts, renewed, cleared when it stops, never for the room's own run.
+- **The forecast:** learned from the other heads' starts, sent within 5 min, cleared when the head starts; skipped for a head without the action.
 - **The disable switch.**
 - **A head offline.**
 - **The config flow.**
 
 **Next steps for the integration**, before any app:
 - **Hold off overshoot:** delay another head's run with a small low-power offset (5a's `apply_offset`) while a hinted room is near the top of its band.
-- **Group heating:** with planned recovery (5b), switch a parked room on during another head's run before it needs one of its own.
 - **Emergency mode switch (5d).**
 
 ## Context

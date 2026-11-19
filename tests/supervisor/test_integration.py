@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from freezegun.api import FrozenDateTimeFactory
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant import config_entries
@@ -124,3 +125,54 @@ async def test_config_flow(hass: HomeAssistant, house: FakeHouse) -> None:
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == {CONF_HEADS: heads, CONF_HINTED: [heads[0]]}
+
+
+async def test_forecast_lifecycle(hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory) -> None:
+    await setup_supervisor(hass, house)
+    assert house.calls("hailee", "shared_heat_expected") == [
+        ("shared_heat_expected", {"expected_in_s": -1, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
+    ]
+
+    async def primary(room: float, operating: bool | None = None, minutes: float = 1.0) -> None:
+        freezer.tick(timedelta(minutes=minutes))
+        house.set_climate("primary", room=room, target=19.72)
+        if operating is not None:
+            house.set_operating("primary", operating)
+        await hass.async_block_till_done()
+
+    # Four primary cycles, each starting 0.32 below its target.
+    for _ in range(4):
+        await primary(19.70)
+        await primary(19.40)
+        await primary(19.40, operating=True)
+        await primary(19.80, minutes=8)
+        await primary(19.80, operating=False)
+
+    # Falling 0.06 C/min towards 19.40: no forecast while 19.70 is 5 min out
+    # and the slope is still being measured; then one within 5 min.
+    house.heads["hailee"].calls.clear()
+    for minute in range(12):
+        await primary(20.30 - 0.06 * minute)
+    sent = house.calls("hailee", "shared_heat_expected")
+    assert sent, "a forecast once the primary is due within 5 min"
+    assert 0 < sent[-1][1]["expected_in_s"] <= 300
+    sensor = next(s for s in hass.states.async_all("sensor") if s.entity_id.endswith("_supervisor_action"))
+    assert sensor.state == "shared_heat_expected"
+
+    # The primary starts: shared heat replaces the forecast, which is cleared.
+    house.heads["hailee"].calls.clear()
+    await primary(19.40, operating=True)
+    assert house.calls("hailee") == [("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS})]
+    assert house.calls("hailee", "shared_heat_expected") == [
+        ("shared_heat_expected", {"expected_in_s": -1, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
+    ]
+
+
+async def test_head_without_forecast_action(hass: HomeAssistant, house: FakeHouse) -> None:
+    hass.services.async_remove("esphome", "haileesbedroomhvac_shared_heat_expected")
+    await setup_supervisor(hass, house)
+    house.set_operating("main", True)
+    await hass.async_block_till_done()
+    # Shared heat still goes out; the forecast is skipped.
+    assert ("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS}) in house.calls("hailee")
+    assert house.calls("hailee", "shared_heat_expected") == []

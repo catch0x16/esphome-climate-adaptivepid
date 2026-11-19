@@ -101,6 +101,10 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   // Supervisor hint for start control, valid for valid_for_s seconds: whether
   // heat (cooling) is arriving from other heads. It expires on the head.
   void set_shared_heat_hint(bool active, uint32_t valid_for_s);
+  // Supervisor forecast for start control: heat (cooling) from other heads is
+  // expected in expected_in_s (a head is predicted to start); negative clears
+  // it. Valid for valid_for_s seconds.
+  void set_shared_heat_expected(int32_t expected_in_s, uint32_t valid_for_s);
 
  protected:
   static constexpr uint32_t TARGETS_VERSION = 1;

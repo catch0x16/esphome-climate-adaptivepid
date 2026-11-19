@@ -180,6 +180,13 @@ stretches powered and longer stretches parked.
   when `humidity_sensor` is set). A supervisor can also tell the head directly
   with the `set_shared_heat_hint(active, valid_for_s)` method, exposed as an
   ESPHome action; the hint expires on the head.
+- A supervisor can also forecast that heat with
+  `set_shared_heat_expected(expected_in_s, valid_for_s)` (negative clears it):
+  another head is predicted to start. The head then waits for that heat rather
+  than start a run that stacks on top of it (for up to 6 min, and not once the
+  room is 0.5 short of target), switches on when parked and below target so
+  its fan brings the heat in, and ends its own run once the other head is due
+  within 2 min.
 - What start control learns is saved across reboots like the room model;
   `reset_tuning()` clears it too.
 
@@ -190,11 +197,16 @@ api:
       variables: {active: bool, valid_for_s: int}
       then:
         - lambda: id(hvac).set_shared_heat_hint(active, valid_for_s);
+    - action: shared_heat_expected
+      variables: {expected_in_s: int, valid_for_s: int}
+      then:
+        - lambda: id(hvac).set_shared_heat_expected(expected_in_s, valid_for_s);
 ```
 
 The [`climate_adaptivepid_supervisor`](custom_components/climate_adaptivepid_supervisor)
 Home Assistant integration (installable through HACS) sends that hint from
-the other heads' `Operating` sensors. See
+the other heads' `Operating` sensors, and the forecast from the other heads'
+room temperatures. See
 [docs/supervisor-design.md](docs/supervisor-design.md).
 
 ### Continuous tuning

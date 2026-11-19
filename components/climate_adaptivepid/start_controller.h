@@ -69,6 +69,9 @@ enum class Transition : uint8_t {
   PARKED,             // -> PARKED: the device is off (parked, or cut by hysteresis)
   UNPARK,             // PARKED: the room is past the on threshold; switching the device on
   UNPARKED,           // PARKED -> IDLE: the device is on again
+  DEFERRED,           // IDLE: a start is held off; heat from other heads is expected soon
+  STOPPED_EXPECTED,   // RUN -> IDLE: heat from other heads is expected within expected_stop_s
+  CATCH,              // PARKED: below target and heat from other heads is expected or arriving; switching on
 };
 
 inline const char *transition_to_string(Transition transition) {
@@ -99,6 +102,12 @@ inline const char *transition_to_string(Transition transition) {
       return "unpark: switching the device on";
     case Transition::UNPARKED:
       return "unparked: the device is on";
+    case Transition::DEFERRED:
+      return "start deferred: heat from other heads is expected soon";
+    case Transition::STOPPED_EXPECTED:
+      return "stopped: heat from other heads is expected soon";
+    case Transition::CATCH:
+      return "switching on to take heat from other heads";
   }
   return "unknown";
 }
@@ -120,6 +129,18 @@ struct StartConfig {
   // can take minutes to act on a start (up to 4 min seen), so it is held well
   // past that; a shorter hold gives up and retries from the stay-off level.
   uint32_t start_timeout_ms{300000};
+  // Heat from other heads, forecast by the supervisor (another head is
+  // predicted to start). A forecast this close counts:
+  uint32_t expect_window_s{300};
+  // A start is deferred while heat is expected, unless the room is this far
+  // short of the target (C) or the deferral has lasted defer_max_ms.
+  float defer_floor{0.5f};
+  uint32_t defer_max_ms{360000};
+  // A run past min_run_ms stops when heat is expected within this.
+  uint32_t expected_stop_s{120};
+  // A parked head is switched on to take heat from other heads (expected or
+  // arriving) once the room is this far short of the target (C).
+  float catch_below{0.1f};
   // A start becomes a run once the unit has reported running this long without
   // a break. Right after power-on a unit can report running for ~20 s and stop;
   // until confirmed the start setpoint is kept, so the unit is still asked to
@@ -143,6 +164,9 @@ struct StartInput {
   float demand{0.0f};       // PID output - target, mirrored when cooling
   bool room_rising{false};  // the room is moving the way output would move it
   bool shared_heat{false};  // heat (cooling) arriving from other heads
+  // Seconds until heat (cooling) from other heads is expected (0 once due);
+  // NaN when nothing is forecast.
+  float shared_expected_s{NAN};
   float coast{0.0f};        // expected further move after a stop, >= 0
   // Hysteresis is holding: the room is past its off threshold and it is
   // waiting out off_delay before switching the device off.
@@ -212,12 +236,23 @@ class StartController {
     const bool known = std::isfinite(in.room) && std::isfinite(in.target);
     const float past = known ? sign * (in.room - in.target) : NAN;
 
+    // Heat from other heads is forecast within the window.
+    const bool expected = std::isfinite(in.shared_expected_s) &&
+                          in.shared_expected_s <= static_cast<float>(this->config_.expect_window_s);
+    bool deferring = false;
+    if (this->state_ != HeadState::IDLE) {
+      this->deferring_ = false;
+    }
+
     switch (this->state_) {
       case HeadState::PARKED: {
         const bool want_on = known && -past > this->config_.on_threshold;
-        if (want_on && this->power_change_allowed_(in.now_ms)) {
+        // Below target with heat from other heads on its way: switch on so the
+        // head's fan brings it in, rather than starting a run of its own later.
+        const bool catch_heat = known && (expected || in.shared_heat) && -past > this->config_.catch_below;
+        if ((want_on || catch_heat) && this->power_change_allowed_(in.now_ms)) {
           out.power = PowerRequest::TURN_ON;
-          out.transition = Transition::UNPARK;
+          out.transition = want_on ? Transition::UNPARK : Transition::CATCH;
         }
         break;
       }
@@ -239,10 +274,30 @@ class StartController {
           }
           break;
         }
-        const bool start = in.demand >= this->config_.start_threshold && !in.shared_heat && !in.room_rising &&
-                           !in.hold && std::isfinite(view) &&
-                           this->since_stop_ms(in.now_ms) >= this->config_.min_cycle_ms;
+        bool start = in.demand >= this->config_.start_threshold && !in.shared_heat && !in.room_rising &&
+                     !in.hold && std::isfinite(view) &&
+                     this->since_stop_ms(in.now_ms) >= this->config_.min_cycle_ms;
+        // Heat from other heads is due: wait for it rather than start a run
+        // that would stack on top of it. Not past the floor, and not for long.
+        // A deferral lasts while a start is wanted and the heat is expected;
+        // once either goes (the heat came, or the forecast was dropped) it ends.
+        const bool defer = start && expected && known && -past < this->config_.defer_floor;
+        if (!defer) {
+          this->deferring_ = false;
+        }
+        if (defer) {
+          if (!this->deferring_) {
+            this->deferring_ = true;
+            this->defer_since_ms_ = in.now_ms;
+            out.transition = Transition::DEFERRED;
+          }
+          if (static_cast<uint32_t>(in.now_ms - this->defer_since_ms_) < this->config_.defer_max_ms) {
+            start = false;
+            deferring = true;
+          }
+        }
         if (start) {
+          this->deferring_ = false;
           this->state_ = HeadState::START;
           this->start_view_ = view;
           this->start_ms_ = in.now_ms;
@@ -301,11 +356,19 @@ class StartController {
         const bool ran_long_enough =
             static_cast<uint32_t>(in.now_ms - this->start_ms_) >= this->config_.min_run_ms;
         const bool peak_reaches_target = known && past + in.coast >= 0.0f;
+        const bool expected_soon =
+            std::isfinite(in.shared_expected_s) &&
+            in.shared_expected_s <= static_cast<float>(this->config_.expected_stop_s);
         if (ran_long_enough && peak_reaches_target) {
           this->state_ = HeadState::IDLE;
           this->note_stop_(in.now_ms);
           this->stop_cmd_ms_ = in.now_ms;
           out.transition = Transition::STOPPED_EARLY;
+        } else if (ran_long_enough && expected_soon) {
+          this->state_ = HeadState::IDLE;
+          this->note_stop_(in.now_ms);
+          this->stop_cmd_ms_ = in.now_ms;
+          out.transition = Transition::STOPPED_EXPECTED;
         } else if (in.shared_heat) {
           this->state_ = HeadState::IDLE;
           this->note_stop_(in.now_ms);
@@ -320,7 +383,8 @@ class StartController {
     out.setpoint = this->setpoint_(view, sign);
     // While the output is held below what the PID asks for, its integral must
     // not build up against it.
-    out.freeze_integral = this->state_ != HeadState::IDLE;
+    // A deliberate wait for heat from other heads holds the output too.
+    out.freeze_integral = this->state_ != HeadState::IDLE || deferring;
     return out;
   }
 
@@ -371,6 +435,9 @@ class StartController {
   uint32_t start_ms_{0};
   // While in START: when the unit's current spell of reporting running began.
   bool operating_since_valid_{false};
+  // A start held off for expected heat from other heads, and since when.
+  bool deferring_{false};
+  uint32_t defer_since_ms_{0};
   uint32_t operating_since_ms_{0};
   bool has_stop_{false};
   uint32_t last_stop_ms_{0};
