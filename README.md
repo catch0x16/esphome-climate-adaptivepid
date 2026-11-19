@@ -148,7 +148,7 @@ sends one of three setpoints relative to the unit's view:
 |---|---|---|
 | IDLE | view − 1.0 | after every stop; the unit stays off |
 | START | view | the PID's demand reaches `start_threshold`, no heat is arriving from other heads, and the room isn't still rising |
-| RUN | view at start − 0.5 | the unit reports running; it stops by itself once its view moves one step, or is stopped early when the predicted peak reaches the target |
+| RUN | view at start − 0.5 | the unit has reported running for 60 s (a shorter spell keeps the start setpoint); it stops by itself once its view moves one step, or is stopped early when the predicted peak reaches the target |
 | PARKED | device off | the room is `off_threshold` past the target: at once while heat arrives from other heads, otherwise after the hysteresis `off_delay` (or at once past `off_limit`) |
 
 A powered head on a shared outdoor unit keeps receiving refrigerant while

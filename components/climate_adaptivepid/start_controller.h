@@ -58,7 +58,7 @@ enum class PowerRequest : uint8_t { NONE, TURN_ON, TURN_OFF };
 enum class Transition : uint8_t {
   NONE,
   STARTED,            // IDLE -> START: demand reached the start threshold
-  RUNNING,            // START -> RUN: the unit reports it is running
+  RUNNING,            // START -> RUN: the unit has reported running for run_confirm_ms
   START_TIMED_OUT,    // START -> IDLE: the unit never started
   STOPPED_BY_UNIT,    // RUN -> IDLE: the unit stopped by itself
   STOPPED_EARLY,      // RUN -> IDLE: the predicted peak reached the target
@@ -120,6 +120,11 @@ struct StartConfig {
   // can take minutes to act on a start (up to 4 min seen), so it is held well
   // past that; a shorter hold gives up and retries from the stay-off level.
   uint32_t start_timeout_ms{300000};
+  // A start becomes a run once the unit has reported running this long without
+  // a break. Right after power-on a unit can report running for ~20 s and stop;
+  // until confirmed the start setpoint is kept, so the unit is still asked to
+  // start.
+  uint32_t run_confirm_ms{60000};
   // After a stop is commanded, the unit may report running for a while longer.
   uint32_t stop_grace_ms{60000};
   // A run is not stopped early before this; the room only starts to respond
@@ -241,6 +246,7 @@ class StartController {
           this->state_ = HeadState::START;
           this->start_view_ = view;
           this->start_ms_ = in.now_ms;
+          this->operating_since_valid_ = false;
           out.transition = Transition::STARTED;
         }
         break;
@@ -251,19 +257,31 @@ class StartController {
           this->note_stop_(in.now_ms);
           this->stop_cmd_ms_ = in.now_ms;
           out.transition = Transition::STOPPED_HOLD;
-        } else if (in.operating) {
-          this->state_ = HeadState::RUN;
-          out.transition = Transition::RUNNING;
         } else if (in.shared_heat) {
           // Heat from other heads arrived while the unit was still starting.
           this->state_ = HeadState::IDLE;
           this->note_stop_(in.now_ms);
           this->stop_cmd_ms_ = in.now_ms;
           out.transition = Transition::STOPPED_SHARED;
-        } else if (static_cast<uint32_t>(in.now_ms - this->start_ms_) >= this->config_.start_timeout_ms) {
-          this->state_ = HeadState::IDLE;
-          this->note_stop_(in.now_ms);
-          out.transition = Transition::START_TIMED_OUT;
+        } else if (in.operating) {
+          // Running, but not yet confirmed: keep asking the unit to start.
+          // The start doesn't time out while the unit reports running.
+          if (!this->operating_since_valid_) {
+            this->operating_since_valid_ = true;
+            this->operating_since_ms_ = in.now_ms;
+          }
+          if (static_cast<uint32_t>(in.now_ms - this->operating_since_ms_) >= this->config_.run_confirm_ms) {
+            this->state_ = HeadState::RUN;
+            out.transition = Transition::RUNNING;
+          }
+        } else {
+          // Not running (or a short spell ended): the start setpoint stays.
+          this->operating_since_valid_ = false;
+          if (static_cast<uint32_t>(in.now_ms - this->start_ms_) >= this->config_.start_timeout_ms) {
+            this->state_ = HeadState::IDLE;
+            this->note_stop_(in.now_ms);
+            out.transition = Transition::START_TIMED_OUT;
+          }
         }
         break;
       case HeadState::RUN: {
@@ -351,6 +369,9 @@ class StartController {
   HeadState state_{HeadState::IDLE};
   float start_view_{NAN};
   uint32_t start_ms_{0};
+  // While in START: when the unit's current spell of reporting running began.
+  bool operating_since_valid_{false};
+  uint32_t operating_since_ms_{0};
   bool has_stop_{false};
   uint32_t last_stop_ms_{0};
   uint32_t stop_cmd_ms_{0};

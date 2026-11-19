@@ -60,7 +60,7 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 | From → to | Trigger | Action |
 |---|---|---|
 | IDLE → START | demand ≥ `start_threshold`, **and** no shared heat, **and** the room isn't rising (≥ 0.02 °C/min over 2 min), **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding | setpoint = view |
-| START → RUN | the unit reports `operating` | setpoint = view at start − 1 step |
+| START → RUN | the unit has reported `operating` for 60 s without a break (right after power-on a unit can report running for ~20 s and stop; until confirmed the start setpoint stays and the start doesn't time out while the unit reports running) | setpoint = view at start − 1 step |
 | START → IDLE | no `operating` within `start_timeout` (default 5 min) | idle setpoint |
 | START → IDLE | shared heat starts | idle setpoint |
 | RUN → IDLE | the unit stops by itself | idle setpoint |

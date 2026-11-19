@@ -42,6 +42,17 @@ static StartController make() {
   cfg.on_threshold = 0.25f;
   cfg.off_threshold = 0.4f;
   cfg.min_cycle_ms = 60 * S;
+  // Runs are confirmed at once here; confirmation has its own tests below.
+  cfg.run_confirm_ms = 0;
+  c.configure(cfg);
+  return c;
+}
+
+// The same, with the default run confirmation.
+static StartController make_confirming() {
+  StartController c = make();
+  StartConfig cfg = c.config();
+  cfg.run_confirm_ms = StartConfig{}.run_confirm_ms;
   c.configure(cfg);
   return c;
 }
@@ -177,6 +188,71 @@ int main() {
     StartDecision d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "shared heat ends a start");
     check(near(d.setpoint, 19.0f), "shared heat ends a start: idle setpoint");
+  }
+  {
+    // Hailee's room 2026-11-19 01:44: switched on straight into a start, the
+    // unit reported running for 20 s and stopped. That is not a run: the start
+    // setpoint stays until running holds for run_confirm_ms.
+    StartController c = make_confirming();
+    StartDecision d = c.update(idle_input(0, 0.6f));
+    check(d.state == HeadState::START, "confirm: starts");
+    StartInput in = idle_input(10 * S, 0.6f);
+    in.operating = true;
+    d = c.update(in);
+    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "confirm: running, not yet a run; start setpoint kept");
+    in.now_ms = 30 * S;
+    in.operating = false;
+    d = c.update(in);
+    check(d.state == HeadState::START && d.transition == Transition::NONE && near(d.setpoint, 20.0f),
+          "confirm: a 20 s spell is not a run; still asking the unit to start");
+    in.now_ms = 90 * S;
+    in.operating = true;
+    d = c.update(in);
+    check(d.state == HeadState::START, "confirm: running again, the confirmation restarts");
+    in.now_ms = 140 * S;
+    d = c.update(in);
+    check(d.state == HeadState::START, "confirm: not before run_confirm_ms of running");
+    in.now_ms = 150 * S;
+    d = c.update(in);
+    check(d.state == HeadState::RUN && d.transition == Transition::RUNNING, "confirm: a run after 60 s of running");
+    check(near(d.setpoint, 19.5f), "confirm: run setpoint once confirmed");
+  }
+  {
+    // A start whose run is never confirmed still times out, but not while the
+    // unit reports running.
+    StartController c = make_confirming();
+    c.update(idle_input(0, 0.6f));
+    StartInput in = idle_input(4 * MIN + 30 * S, 0.6f);
+    in.operating = true;
+    StartDecision d = c.update(in);
+    in.now_ms = 5 * MIN + 10 * S;
+    d = c.update(in);
+    check(d.state == HeadState::START, "confirm: no timeout while the unit reports running");
+    in.now_ms = 5 * MIN + 30 * S;
+    d = c.update(in);
+    check(d.state == HeadState::RUN, "confirm: confirmed past the timeout");
+    StartController never = make_confirming();
+    never.update(idle_input(0, 0.6f));
+    in = idle_input(MIN, 0.6f);
+    in.operating = true;
+    never.update(in);
+    in.now_ms = MIN + 20 * S;
+    in.operating = false;
+    never.update(in);
+    d = never.update(idle_input(5 * MIN, 0.6f));
+    check(d.state == HeadState::IDLE && d.transition == Transition::START_TIMED_OUT, "confirm: blips only, times out");
+  }
+  {
+    // Shared heat ends a start whose run isn't confirmed yet.
+    StartController c = make_confirming();
+    c.update(idle_input(0, 0.6f));
+    StartInput in = idle_input(10 * S, 0.6f);
+    in.operating = true;
+    c.update(in);
+    in.now_ms = 30 * S;
+    in.shared_heat = true;
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "confirm: shared heat ends an unconfirmed run");
   }
   {
     // Park and unpark on the hysteresis band.
