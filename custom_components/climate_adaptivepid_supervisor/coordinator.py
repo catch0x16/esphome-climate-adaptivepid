@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 import logging
+import math
 
 from homeassistant.components.logbook import async_log_entry
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON, UnitOfTemperature
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
@@ -23,6 +24,9 @@ from .const import (
     ACTION_SHARED_HEAT_EXPECTED,
     CONF_HEADS,
     CONF_HINTED,
+    CONF_OUTDOOR,
+    MODEL_NAMES,
+    MODEL_RATES,
     OPERATING_NAME,
     RENEW_SECONDS,
     SAVE_DELAY_SECONDS,
@@ -34,6 +38,8 @@ from .logic import (
     Head,
     ModeConflict,
     OperatingHold,
+    RecoveryTracker,
+    RoomModel,
     RoomPlan,
     StartPredictor,
     StartStats,
@@ -41,6 +47,7 @@ from .logic import (
     mode_conflict,
     outdoor_unit_running,
     plan,
+    recovery_minutes,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,13 +63,15 @@ class HeadEntities:
     climate: str
     operating: str | None
     node: str | None
+    # RoomModel field -> the head's sensor publishing it.
+    model: dict[str, str] = field(default_factory=dict)
 
 
-def _head_options(entry: ConfigEntry) -> tuple[list[str], list[str]]:
+def _head_options(entry: ConfigEntry) -> tuple[list[str], list[str], str | None]:
     data = {**entry.data, **entry.options}
     heads = list(data.get(CONF_HEADS, []))
     hinted = [h for h in data.get(CONF_HINTED, []) if h in heads]
-    return heads, hinted
+    return heads, hinted, data.get(CONF_OUTDOOR) or None
 
 
 def resolve_head(hass: HomeAssistant, climate_entity_id: str) -> HeadEntities:
@@ -71,10 +80,14 @@ def resolve_head(hass: HomeAssistant, climate_entity_id: str) -> HeadEntities:
     entry = ent_reg.async_get(climate_entity_id)
     operating: str | None = None
     node: str | None = None
+    model: dict[str, str] = {}
+    by_name = {name: key for key, name in MODEL_NAMES.items()}
     if entry is not None and entry.device_id is not None:
         for other in er.async_entries_for_device(ent_reg, entry.device_id):
             if other.domain == "binary_sensor" and (other.original_name or "") == OPERATING_NAME:
                 operating = other.entity_id
+            elif other.domain == "sensor" and (other.original_name or "") in by_name:
+                model[by_name[other.original_name]] = other.entity_id
         device = dr.async_get(hass).async_get(entry.device_id)
         if device is not None:
             # A device belongs to one config entry (`config_entry_id`); older
@@ -87,7 +100,7 @@ def resolve_head(hass: HomeAssistant, climate_entity_id: str) -> HeadEntities:
                 config_entry = hass.config_entries.async_get_entry(config_entry_id) if config_entry_id else None
                 if config_entry is not None and config_entry.domain == "esphome":
                     node = config_entry.data.get("device_name")
-    return HeadEntities(climate=climate_entity_id, operating=operating, node=node)
+    return HeadEntities(climate=climate_entity_id, operating=operating, node=node, model=model)
 
 
 def make_store(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
@@ -101,7 +114,7 @@ class SupervisorCoordinator:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
-        self.heads, self.hinted = _head_options(entry)
+        self.heads, self.hinted, self.outdoor_entity = _head_options(entry)
         self.entities: dict[str, HeadEntities] = {}
         self.enabled = True
         self.outdoor_running = False
@@ -117,6 +130,11 @@ class SupervisorCoordinator:
         self.mode_conflict: ModeConflict | None = None
         self._conflict = Sustained(CONFLICT_SUSTAIN_S)
         self._issues: set[str] = set()
+        self.recoveries: dict[str, RecoveryTracker] = {}
+        self.models: dict[str, RoomModel] = {}
+        self.outdoor: float | None = None
+        # Each head's current recovery estimate (minutes).
+        self.recovery_estimates: dict[str, float | None] = {}
         self._store = make_store(hass, entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
@@ -137,6 +155,7 @@ class SupervisorCoordinator:
                 continue
             self.predictors.setdefault(climate, StartPredictor()).load(saved.get("predictor"))
             self.stats.head(climate).load(saved.get("stats"))
+            self.recoveries.setdefault(climate, RecoveryTracker()).load(saved.get("recovery"))
 
     def _issue_id(self, key: str) -> str:
         return f"{self.entry.entry_id}_{key}"
@@ -176,6 +195,7 @@ class SupervisorCoordinator:
                 climate: {
                     "predictor": self.predictors[climate].to_dict() if climate in self.predictors else {},
                     "stats": self.stats.head(climate).to_dict(),
+                    "recovery": self.recoveries[climate].to_dict() if climate in self.recoveries else {},
                 }
                 for climate in self.heads
             }
@@ -236,6 +256,34 @@ class SupervisorCoordinator:
             )
         return heads
 
+    def _number(self, entity_id: str | None) -> float | None:
+        if entity_id is None:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return None
+        try:
+            value = float(state.state)
+        except ValueError:
+            return None
+        return value if math.isfinite(value) else None
+
+    def _room_model(self, entities: HeadEntities) -> RoomModel:
+        """The head's published room model; rates in Home Assistant's temperature unit."""
+        fahrenheit = self.hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT
+        values: dict[str, float | None] = {}
+        for key, entity_id in entities.model.items():
+            value = self._number(entity_id)
+            if value is not None and key in MODEL_RATES:
+                state = self.hass.states.get(entity_id)
+                unit = str(state.attributes.get("unit_of_measurement", "")) if state else ""
+                if fahrenheit and unit.startswith("°C"):
+                    value *= 1.8
+                elif not fahrenheit and unit.startswith("°F"):
+                    value /= 1.8
+            values[key] = value
+        return RoomModel(**values)
+
     def _operating(self, entities: HeadEntities) -> bool | None:
         """On or off; None while the sensor is unavailable. A head without one counts as off."""
         if entities.operating is None:
@@ -266,6 +314,19 @@ class SupervisorCoordinator:
             heads[climate] = replace(head, operating=hold.update(now, head.operating))
             expected[climate] = predictor.expected_in_s(now, heads[climate])
             self.stats.forecast(now, climate, expected[climate])
+        self.outdoor = self._number(self.outdoor_entity)
+        for climate, head in reported.items():
+            model = self.models[climate] = self._room_model(self.entities[climate])
+            self.recovery_estimates[climate] = recovery_minutes(head, model, self.outdoor)
+            tracker = self.recoveries.setdefault(climate, RecoveryTracker())
+            result = tracker.observe(now, head, model, self.outdoor)
+            if result is not None:
+                message = (
+                    f"recovered in {result.actual_min:.0f} min, predicted {result.predicted_min:.0f} min"
+                )
+                _LOGGER.info("%s: %s", climate, message)
+                async_log_entry(self.hass, "Supervisor", message, domain=DOMAIN, entity_id=climate)
+                self._store.async_delay_save(self._data, SAVE_DELAY_SECONDS)
         self.outdoor_running = outdoor_unit_running(heads)
         conflict = mode_conflict(heads)
         sustained = self._conflict.update(now, conflict is not None)

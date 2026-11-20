@@ -26,6 +26,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Supervi
         hold = coordinator.holds.get(climate)
         stats = coordinator.stats.head(climate)
         room_plan = coordinator.plans.get(climate)
+        tracker = coordinator.recoveries.get(climate)
+        model = coordinator.models.get(climate)
         heads[climate] = {
             "entities": asdict(entities) if entities else None,
             "hinted": climate in coordinator.hinted,
@@ -47,6 +49,14 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Supervi
             "operating_hold": None
             if hold is None
             else {"known": hold.known, "unknown_for_s": ago(hold.unknown_since)},
+            "recovery": {
+                "model": asdict(model) if model else None,
+                "estimate_min": coordinator.recovery_estimates.get(climate),
+                "timing": None
+                if tracker is None or tracker.active is None
+                else {"started_s_ago": ago(tracker.active[0]), "mode": tracker.active[1], "predicted_min": tracker.active[2]},
+                "results": tracker.to_dict()["results"] if tracker else [],
+            },
             "stats": {
                 **stats.to_dict(),
                 "hit_rate": stats.hit_rate,
@@ -62,6 +72,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Supervi
         "version": entry.version,
         "enabled": coordinator.enabled,
         "outdoor_unit_running": coordinator.outdoor_running,
+        "outdoor_entity": coordinator.outdoor_entity,
+        "outdoor": coordinator.outdoor,
         "mode_conflict": asdict(conflict) if conflict else None,
         "heads": heads,
     }

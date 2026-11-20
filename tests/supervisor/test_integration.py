@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from freezegun.api import FrozenDateTimeFactory
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant import config_entries
@@ -14,10 +15,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from custom_components.climate_adaptivepid_supervisor.const import (
     CONF_HEADS,
     CONF_HINTED,
+    CONF_OUTDOOR,
     DOMAIN,
     SHARED_HEAT_VALID_SECONDS,
     STORAGE_VERSION,
@@ -352,3 +355,61 @@ async def test_diagnostics(hass: HomeAssistant, house: FakeHouse) -> None:
     primary = diagnostics["heads"][house.heads["primary"].climate]
     assert primary["stats"]["starts"] == 1 and primary["predictor"]["operating"] is True
     assert diagnostics["outdoor_unit_running"] is True and diagnostics["mode_conflict"] is None
+
+
+async def test_recovery_estimate_and_timing(
+    hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory, hass_storage: dict[str, Any]
+) -> None:
+    hass.states.async_set("sensor.outdoor", "0.0", {"unit_of_measurement": "°C", "device_class": "temperature"})
+    house.set_model("primary", **{"Heating rate": 2.0, "Heat loss": 0.1, "Dead time heating": 5.0})
+    house.set_climate("primary", room=19.65, target=19.72)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Outdoor unit",
+        entry_id="recovery",
+        data={CONF_HEADS: [h.climate for h in house.heads.values()], CONF_HINTED: [], CONF_OUTDOOR: "sensor.outdoor"},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    estimate = "sensor.outdoor_unit_primarybedroomhvac_hvac_recovery_time"
+    error = "sensor.outdoor_unit_primarybedroomhvac_hvac_recovery_forecast_error"
+    assert float(hass.states.get(estimate).state) == 0.0  # within 0.1 of target
+    assert hass.states.get(estimate).attributes["outdoor"] == 0.0
+    # A head without a model has no estimate.
+    assert hass.states.get("sensor.outdoor_unit_mainfloorhvac_hvac_recovery_time").state == "unknown"
+
+    # The morning raise: 19.6 to 20.28. Steady state 20: out of reach, not timed.
+    house.set_climate("primary", room=19.6, target=20.28)
+    await hass.async_block_till_done()
+    assert hass.states.get(estimate).state == "unknown"
+    assert entry.runtime_data.recoveries[house.heads["primary"].climate].active is None
+
+    # Milder outside: reachable, timed against the real recovery.
+    hass.states.async_set("sensor.outdoor", "10.0", {"unit_of_measurement": "°C", "device_class": "temperature"})
+    house.set_climate("primary", room=19.6, target=19.72)
+    await hass.async_block_till_done()
+    house.set_climate("primary", room=19.6, target=20.28)
+    await hass.async_block_till_done()
+    predicted = float(hass.states.get(estimate).state)
+    assert predicted > 5.0
+    assert hass.states.get(error).attributes["timing_predicted_min"] == pytest.approx(predicted, abs=0.1)
+    freezer.tick(timedelta(minutes=40))
+    house.set_climate("primary", room=20.2, target=20.28)
+    await hass.async_block_till_done()
+    assert float(hass.states.get(error).state) == pytest.approx(40.0 - predicted, abs=0.1)
+    assert hass.states.get(error).attributes["recoveries"] == 1
+    # Kept across restarts.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    saved = hass_storage[f"{DOMAIN}.recovery"]["data"]["heads"][house.heads["primary"].climate]["recovery"]
+    assert len(saved["results"]) == 1
+
+
+async def test_recovery_rates_converted_to_fahrenheit(hass: HomeAssistant, house: FakeHouse) -> None:
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    house.set_model("primary", **{"Heating rate": 2.0, "Dead time heating": 5.0})
+    house.set_climate("primary", room=66.0, target=68.0)
+    await setup_supervisor(hass, house)
+    # 1.9 F to go at 2.0 C/h = 3.6 F/h: 31.7 min, plus 5 dead.
+    minutes = float(hass.states.get("sensor.outdoor_unit_primarybedroomhvac_hvac_recovery_time").state)
+    assert minutes == pytest.approx(5.0 + 60.0 * 1.9 / 3.6, abs=0.1)

@@ -6,6 +6,8 @@ DOMAIN = "climate_adaptivepid_supervisor"
 
 CONF_HEADS = "heads"
 CONF_HINTED = "hinted"
+# Optional: the outdoor temperature sensor, for recovery estimates.
+CONF_OUTDOOR = "outdoor"
 
 DEFAULT_NAME = "Outdoor unit"
 
@@ -23,6 +25,16 @@ ACTION_SHARED_HEAT_EXPECTED = "shared_heat_expected"
 
 # The climate_adaptivepid diagnostic entity that reports the unit running.
 OPERATING_NAME = "Operating"
+# The room model a head learns and publishes (RoomModel field -> entity name).
+MODEL_NAMES = {
+    "heat_rate": "Heating rate",
+    "cool_rate": "Cooling rate",
+    "loss": "Heat loss",
+    "heat_dead_min": "Dead time heating",
+    "cool_dead_min": "Dead time cooling",
+}
+# The rates are rates of temperature: converted to Home Assistant's unit.
+MODEL_RATES = ("heat_rate", "cool_rate")
 
 # Learned starts and statistics are saved this long after a start, and at unload.
 STORAGE_VERSION = 1

@@ -11,7 +11,7 @@ from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import CONF_HEADS, CONF_HINTED, DEFAULT_NAME, DOMAIN
+from .const import CONF_HEADS, CONF_HINTED, CONF_OUTDOOR, DEFAULT_NAME, DOMAIN
 
 
 def _schema(defaults: dict[str, Any], with_name: bool) -> vol.Schema:
@@ -23,6 +23,9 @@ def _schema(defaults: dict[str, Any], with_name: bool) -> vol.Schema:
     )
     fields[vol.Optional(CONF_HINTED, default=defaults.get(CONF_HINTED, []))] = selector.EntitySelector(
         selector.EntitySelectorConfig(domain="climate", multiple=True)
+    )
+    fields[vol.Optional(CONF_OUTDOOR, description={"suggested_value": defaults.get(CONF_OUTDOOR)})] = (
+        selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="temperature"))
     )
     return vol.Schema(fields)
 

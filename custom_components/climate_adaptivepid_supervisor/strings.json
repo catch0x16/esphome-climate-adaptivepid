@@ -7,7 +7,11 @@
         "data": {
           "name": "Name",
           "heads": "Heads on the outdoor unit",
-          "hinted": "Rooms that receive hints"
+          "hinted": "Rooms that receive hints",
+          "outdoor": "Outdoor temperature (optional)"
+        },
+        "data_description": {
+          "outdoor": "Used to estimate how long each room takes to recover to its target. Without it, heat loss is left out."
         }
       }
     },
@@ -24,7 +28,11 @@
       "init": {
         "data": {
           "heads": "Heads on the outdoor unit",
-          "hinted": "Rooms that receive hints"
+          "hinted": "Rooms that receive hints",
+          "outdoor": "Outdoor temperature (optional)"
+        },
+        "data_description": {
+          "outdoor": "Used to estimate how long each room takes to recover to its target. Without it, heat loss is left out."
         }
       }
     },
@@ -71,6 +79,12 @@
       },
       "start_forecast_hit_rate": {
         "name": "{room} start forecast hit rate"
+      },
+      "recovery_time": {
+        "name": "{room} recovery time"
+      },
+      "recovery_forecast_error": {
+        "name": "{room} recovery forecast error"
       }
     }
   },

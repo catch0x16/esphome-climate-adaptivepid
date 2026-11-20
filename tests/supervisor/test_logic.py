@@ -1,5 +1,7 @@
 """The supervisor's decisions, without Home Assistant."""
 
+import math
+
 import pytest
 
 from custom_components.climate_adaptivepid_supervisor.logic import (
@@ -7,6 +9,10 @@ from custom_components.climate_adaptivepid_supervisor.logic import (
     Head,
     OperatingHold,
     CONFLICT_SUSTAIN_S,
+    RECOVERY_MAX_S,
+    RecoveryTracker,
+    RoomModel,
+    recovery_minutes,
     HeadStats,
     ModeConflict,
     Sustained,
@@ -298,3 +304,77 @@ def test_sustained_only_after_its_time_and_ends_at_once():
     assert watch.update(CONFLICT_SUSTAIN_S, True) is True
     assert watch.update(CONFLICT_SUSTAIN_S + 1, False) is False
     assert watch.update(CONFLICT_SUSTAIN_S + 2, True) is False  # starts over
+
+
+MODEL = RoomModel(heat_rate=2.0, cool_rate=1.5, loss=0.1, heat_dead_min=5.0, cool_dead_min=4.0)
+
+
+def room(temp: float, target: float, mode: str = "heat") -> Head:
+    return Head(name="primary", operating=False, mode=mode, room=temp, target=target)
+
+
+def test_recovery_without_outdoor_is_gap_over_rate():
+    # 1.0 to go, less the 0.1 that counts as there, at 2.0/h: 27 min, plus 5 dead.
+    assert recovery_minutes(room(19.0, 20.0), MODEL, None) == pytest.approx(5.0 + 27.0)
+    assert recovery_minutes(room(21.0, 20.0, "cool"), MODEL, None) == pytest.approx(4.0 + 36.0)
+
+
+def test_recovery_with_heat_loss_takes_longer_in_the_cold():
+    # Steady state 0 + 2.0 / 0.1 = 20 C: the gap to it falls from 1.0 to 0.1
+    # (19.9 reached) after ln(10) / 0.1 h.
+    minutes = recovery_minutes(room(19.0, 20.0), MODEL, 0.0)
+    assert minutes == pytest.approx(5.0 + 60.0 * math.log(10.0) / 0.1)
+    assert minutes > recovery_minutes(room(19.0, 20.0), MODEL, 15.0)
+    # The room settles at 19.5 short of 19.9: out of reach.
+    assert recovery_minutes(room(19.0, 20.0), MODEL, -0.5) is None
+
+
+def test_recovery_at_target_or_unknown():
+    assert recovery_minutes(room(19.95, 20.0), MODEL, None) == 0.0
+    assert recovery_minutes(room(19.0, 20.0, "off"), MODEL, None) is None
+    assert recovery_minutes(room(19.0, 20.0), RoomModel(), None) is None
+    assert recovery_minutes(room(19.0, 20.0), RoomModel(heat_rate=0.0, heat_dead_min=5.0), None) is None
+
+
+def test_recovery_timed_after_a_target_raise():
+    tracker = RecoveryTracker()
+    assert tracker.observe(0, room(19.6, 19.72), MODEL, None) is None
+    tracker.observe(60, room(19.6, 20.28), MODEL, None)  # raised: 0.68 to go
+    assert tracker.active is not None
+    predicted = tracker.active[2]
+    assert predicted == pytest.approx(5.0 + 60.0 * 0.58 / 2.0)
+    assert tracker.observe(1000, room(20.0, 20.28), MODEL, None) is None
+    result = tracker.observe(60 + 30 * 60, room(20.2, 20.28), MODEL, None)
+    assert result.actual_min == pytest.approx(30.0) and result.error_min == pytest.approx(30.0 - predicted)
+    assert tracker.active is None and tracker.last == result
+
+
+def test_small_or_lowering_changes_are_not_timed_and_changes_abort():
+    tracker = RecoveryTracker()
+    tracker.observe(0, room(19.6, 19.72), MODEL, None)
+    tracker.observe(60, room(19.6, 19.80), MODEL, None)  # 0.2 to go: too small
+    tracker.observe(120, room(19.6, 19.00), MODEL, None)  # lowered while heating
+    assert tracker.active is None
+    tracker.observe(180, room(19.0, 20.0), MODEL, None)
+    assert tracker.active is not None
+    tracker.observe(240, room(19.1, 19.5), MODEL, None)  # changed again: dropped, 0.4 to go: new one
+    assert tracker.active is not None and tracker.active[0] == 240
+    tracker.observe(300, room(19.1, 19.5, "cool"), MODEL, None)
+    assert tracker.active is None and not tracker.results
+    tracker.observe(400, room(19.1, 19.5), MODEL, None)  # back to heat, 0.4 below: timed
+    assert tracker.observe(400 + RECOVERY_MAX_S + 1, room(19.2, 19.5), MODEL, None) is None
+    assert tracker.active is None  # too long: dropped
+
+
+def test_recoveries_saved_and_restored():
+    tracker = RecoveryTracker()
+    tracker.observe(0, room(19.0, 19.0), MODEL, None)
+    tracker.observe(60, room(19.0, 20.0), MODEL, None)
+    tracker.observe(3660, room(19.95, 20.0), MODEL, None)
+    restored = RecoveryTracker()
+    restored.load(tracker.to_dict())
+    assert restored.last == tracker.last and restored.mean_abs_error_min == tracker.mean_abs_error_min
+    junk = RecoveryTracker()
+    junk.load({"results": [[1.0], [2.0, "x"], [-1.0, 3.0], [5.0, 1e9], "x", [10.0, 12.5]]})
+    assert [(r.predicted_min, r.actual_min) for r in junk.results] == [(10.0, 12.5)]
+    RecoveryTracker().load(None)

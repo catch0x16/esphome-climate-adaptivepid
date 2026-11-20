@@ -388,3 +388,140 @@ def plan(
         if room_plan is not None:
             plans[name] = room_plan
     return plans
+
+
+# Recovery: how long a head takes to bring its room to target, from the room
+# model the head learns and publishes, and how that compares with real
+# recoveries after a target change.
+#
+#   dT/dt = s * rate - loss * (T - T_outdoor)     (s = +1 heating, -1 cooling)
+#
+# at full output, after the dead time. With the outdoor temperature known, the
+# room heads for T_steady = T_outdoor + s * rate / loss and reaches the target
+# after -ln((target - T_steady) / (T - T_steady)) / loss. Without it, loss is
+# left out (target - T) / rate. It is a full-output estimate for one head: the
+# PID eases off near the target, and heads recovering together share the
+# outdoor unit, so real recoveries take longer.
+
+# A room within this of its target has recovered.
+RECOVERY_REACHED = 0.1
+# A target change that leaves the room at least this far from the new target,
+# in the direction the head works, starts a recovery to time.
+RECOVERY_MIN_GAP = 0.3
+# A recovery not done in this time is dropped (the target was not reachable).
+RECOVERY_MAX_S = 6 * 3600.0
+# Kept and scored over this many recent recoveries.
+RECOVERY_HISTORY = 20
+MAX_RECOVERY_MIN = RECOVERY_MAX_S / 60.0
+
+
+@dataclass(frozen=True)
+class RoomModel:
+    """What a head has learned about its room, as it publishes it."""
+
+    heat_rate: float | None = None  # per hour at full output, in the climate's unit
+    cool_rate: float | None = None
+    loss: float | None = None  # per hour
+    heat_dead_min: float | None = None
+    cool_dead_min: float | None = None
+
+
+def recovery_minutes(head: Head, model: RoomModel, outdoor: float | None) -> float | None:
+    """Minutes until the room is within RECOVERY_REACHED of its target; 0 if it is.
+
+    None outside heat and cool, without the room model, or when the target is
+    out of reach (the room settles short of it).
+    """
+    if head.mode not in ("heat", "cool") or head.room is None or head.target is None:
+        return None
+    heating = head.mode == "heat"
+    sign = 1.0 if heating else -1.0
+    rate = model.heat_rate if heating else model.cool_rate
+    dead = model.heat_dead_min if heating else model.cool_dead_min
+    if rate is None or not rate > 0.0 or dead is None or not dead >= 0.0:
+        return None
+    goal = head.target - sign * RECOVERY_REACHED
+    if sign * (goal - head.room) <= 0.0:
+        return 0.0
+    loss = model.loss if outdoor is not None and model.loss is not None and model.loss > 0.0 else None
+    if loss is None:
+        hours = sign * (goal - head.room) / rate
+    else:
+        steady = outdoor + sign * rate / loss
+        ratio = (goal - steady) / (head.room - steady)
+        if not 0.0 < ratio < 1.0:
+            return None
+        hours = -math.log(ratio) / loss
+    return dead + 60.0 * hours
+
+
+@dataclass(frozen=True)
+class RecoveryResult:
+    predicted_min: float
+    actual_min: float
+
+    @property
+    def error_min(self) -> float:
+        """Actual minus predicted: positive when the room took longer."""
+        return self.actual_min - self.predicted_min
+
+
+@dataclass
+class RecoveryTracker:
+    """Times one head's recoveries after target changes against the estimate."""
+
+    target: float | None = None
+    mode: str | None = None
+    # The recovery being timed: (started, mode, predicted minutes).
+    active: tuple[float, str, float] | None = None
+    results: deque[RecoveryResult] = field(default_factory=lambda: deque(maxlen=RECOVERY_HISTORY))
+
+    def observe(self, now: float, head: Head, model: RoomModel, outdoor: float | None) -> RecoveryResult | None:
+        """Called with each update; the result when a recovery just finished."""
+        changed = (head.target is not None and self.target is not None and head.target != self.target) or (
+            head.mode is not None and self.mode is not None and head.mode != self.mode
+        )
+        if head.target is not None:
+            self.target = head.target
+        if head.mode is not None:
+            self.mode = head.mode
+        finished = None
+        if self.active is not None:
+            started, mode, predicted = self.active
+            if changed or head.mode != mode or now - started > RECOVERY_MAX_S:
+                self.active = None
+            elif head.room is not None and head.target is not None:
+                sign = 1.0 if mode == "heat" else -1.0
+                if sign * (head.target - head.room) <= RECOVERY_REACHED:
+                    finished = RecoveryResult(predicted_min=predicted, actual_min=(now - started) / 60.0)
+                    self.results.append(finished)
+                    self.active = None
+        if changed and head.mode in ("heat", "cool") and head.room is not None and head.target is not None:
+            sign = 1.0 if head.mode == "heat" else -1.0
+            predicted = recovery_minutes(head, model, outdoor)
+            if sign * (head.target - head.room) >= RECOVERY_MIN_GAP and predicted is not None:
+                self.active = (now, head.mode, predicted)
+        return finished
+
+    @property
+    def last(self) -> RecoveryResult | None:
+        return self.results[-1] if self.results else None
+
+    @property
+    def mean_abs_error_min(self) -> float | None:
+        if not self.results:
+            return None
+        return round(statistics.fmean(abs(r.error_min) for r in self.results), 1)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"results": [[r.predicted_min, r.actual_min] for r in self.results]}
+
+    def load(self, data: Any) -> None:
+        """Restores what to_dict saved; anything malformed is skipped."""
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            return
+        for pair in results[-RECOVERY_HISTORY:]:
+            values = _floats(pair, 2, limit=MAX_RECOVERY_MIN)
+            if isinstance(pair, list) and len(pair) == 2 and len(values) == 2 and min(values) >= 0.0:
+                self.results.append(RecoveryResult(predicted_min=values[0], actual_min=values[1]))

@@ -9,7 +9,15 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SupervisorConfigEntry
 from .entity import SupervisorEntity, room_key
-from .logic import HIT_WITHIN_S, SCORE_HISTORY, SCORE_LEAD_S, STACK_WINDOW_S, HeadStats
+from .logic import (
+    HIT_WITHIN_S,
+    RECOVERY_MIN_GAP,
+    RECOVERY_REACHED,
+    SCORE_HISTORY,
+    SCORE_LEAD_S,
+    STACK_WINDOW_S,
+    HeadStats,
+)
 
 ACTIONS = ["none", "shared_heat", "shared_heat_expected", "disabled"]
 
@@ -25,6 +33,8 @@ async def async_setup_entry(
             HeadStackedStarts(coordinator, climate),
             StartForecastError(coordinator, climate),
             StartForecastHitRate(coordinator, climate),
+            RecoveryTime(coordinator, climate),
+            RecoveryForecastError(coordinator, climate),
         ]
     async_add_entities(entities)
 
@@ -156,4 +166,69 @@ class StartForecastHitRate(HeadStatsEntity):
             "within_s": HIT_WITHIN_S,
             "lead_s": SCORE_LEAD_S,
             "history": SCORE_HISTORY,
+        }
+
+
+class RecoveryTime(HeadStatsEntity):
+    """Minutes until the room is at target at full output, from the head's room model."""
+
+    _attr_translation_key = "recovery_time"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator, climate: str) -> None:
+        super().__init__(coordinator, climate, "recovery_time")
+
+    @property
+    def native_value(self) -> float | None:
+        minutes = self.coordinator.recovery_estimates.get(self._climate)
+        return None if minutes is None else round(minutes, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float | str | None]:
+        model = self.coordinator.models.get(self._climate)
+        return {
+            "outdoor": self.coordinator.outdoor,
+            "heating_rate": model.heat_rate if model else None,
+            "cooling_rate": model.cool_rate if model else None,
+            "heat_loss": model.loss if model else None,
+            "dead_time_heating": model.heat_dead_min if model else None,
+            "dead_time_cooling": model.cool_dead_min if model else None,
+            "within": RECOVERY_REACHED,
+        }
+
+
+class RecoveryForecastError(HeadStatsEntity):
+    """The last timed recovery's actual minus predicted minutes."""
+
+    _attr_translation_key = "recovery_forecast_error"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator, climate: str) -> None:
+        super().__init__(coordinator, climate, "recovery_forecast_error")
+
+    @property
+    def tracker(self):
+        return self.coordinator.recoveries.get(self._climate)
+
+    @property
+    def native_value(self) -> float | None:
+        last = self.tracker.last if self.tracker else None
+        return None if last is None else round(last.error_min, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float | int | None]:
+        tracker = self.tracker
+        last = tracker.last if tracker else None
+        active = tracker.active if tracker else None
+        return {
+            "predicted_min": None if last is None else round(last.predicted_min, 1),
+            "actual_min": None if last is None else round(last.actual_min, 1),
+            "recoveries": len(tracker.results) if tracker else 0,
+            "mean_abs_error_min": tracker.mean_abs_error_min if tracker else None,
+            "timing_predicted_min": None if active is None else round(active[2], 1),
+            "min_gap": RECOVERY_MIN_GAP,
         }

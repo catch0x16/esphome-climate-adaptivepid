@@ -26,6 +26,15 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
 
+MODEL_SENSORS = {
+    "Heating rate": "°C/h",
+    "Cooling rate": "°C/h",
+    "Heat loss": "1/h",
+    "Dead time heating": "min",
+    "Dead time cooling": "min",
+}
+
+
 @dataclass
 class FakeHead:
     """One climate_adaptivepid head as Home Assistant sees it."""
@@ -34,6 +43,8 @@ class FakeHead:
     climate: str
     operating: str
     calls: list[tuple[str, dict]] = field(default_factory=list)
+    # Room model sensor name -> entity id.
+    model: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -48,6 +59,13 @@ class FakeHouse:
 
     def set_operating(self, key: str, on: bool) -> None:
         self.hass.states.async_set(self.heads[key].operating, "on" if on else "off")
+
+    def set_model(self, key: str, **values: float) -> None:
+        """Publish room model values by sensor name, e.g. set_model("primary", **{"Heating rate": 2.0})."""
+        for name, value in values.items():
+            self.hass.states.async_set(
+                self.heads[key].model[name], str(value), {"unit_of_measurement": MODEL_SENSORS[name]}
+            )
 
     def calls(self, key: str, action: str = "shared_heat") -> list[tuple[str, dict]]:
         """One action's calls to a head (shared_heat by default)."""
@@ -72,7 +90,14 @@ async def house(hass: HomeAssistant) -> FakeHouse:
             "binary_sensor", "esphome", f"{node}-operating", device_id=device.id, config_entry=esphome_entry,
             suggested_object_id=f"{node}_operating", original_name="Operating",
         )
-        head = FakeHead(node=node, climate=climate.entity_id, operating=operating.entity_id)
+        model: dict[str, str] = {}
+        for name, unit in MODEL_SENSORS.items():
+            sensor = ent_reg.async_get_or_create(
+                "sensor", "esphome", f"{node}-{name}", device_id=device.id, config_entry=esphome_entry,
+                suggested_object_id=f"{node}_{name}", original_name=name,
+            )
+            model[name] = sensor.entity_id
+        head = FakeHead(node=node, climate=climate.entity_id, operating=operating.entity_id, model=model)
         heads[key] = head
 
         def make_handler(head=head):

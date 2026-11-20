@@ -33,6 +33,7 @@ The measurements behind the coordination are in [research/shared-outdoor-unit.md
 **Config flow.**
 - **Pick the heads on one outdoor unit:** their adaptive PID climates, at least two.
 - **Pick the rooms that receive hints:** they need `start_control` and the ESPHome action below.
+- **Optionally, the outdoor temperature sensor**, for recovery estimates.
 
 For each head, the integration finds its `Operating` binary sensor and its ESPHome node name (from the head's ESPHome config entry) through the device registry.
 
@@ -70,6 +71,14 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 
 **Repair issues** (Settings → Repairs) are also raised at setup for a head without an `Operating` sensor (it always counts as not running) and for a hinted room without an ESPHome device (no hints can be sent). They are removed when the integration unloads and raised again on the next start if they still apply.
 
+**Recovery.** Groundwork for Phase 5b's early recovery, and the "predicted versus actual recovery" check the rollout asks for before it. Each head learns and publishes its room model (`Heating rate` and `Cooling rate` in °C/h at full output, `Heat loss` per hour, `Dead time heating` and `Dead time cooling` in minutes); the supervisor finds those sensors on the head's device and converts the rates to Home Assistant's temperature unit. With an outdoor temperature sensor picked in the options, the time to bring the room within 0.1 of its target at full output is
+
+    dead time + ln((target − T_steady) / (T_room − T_steady)) / loss,   T_steady = T_outdoor ± rate / loss
+
+(+ heating, − cooling); a target past `T_steady` is out of reach (no estimate). Without the outdoor sensor, heat loss is left out: dead time + (target − T_room) / rate. It is a full-output estimate for one head: the PID eases off near the target and heads recovering together share the outdoor unit, so real recoveries should take longer, and the error shows by how much.
+
+A target change that leaves the room at least 0.3 from the new target in the direction the head works (raised while heating, lowered while cooling) starts a timed recovery with the estimate at that moment. It ends when the room is within 0.1 of the target; another target or mode change drops it, as does not reaching it within 6 hours. The last 20 results are saved with the other state, and each one is written to the logbook.
+
 **Diagnostics:** the integration's *Download diagnostics* gives, per head, its resolved entities, plan and last hints sent, the learned starts per mode and recent room samples, the `Operating` hold, and the start statistics including the pending forecast.
 
 **Saved state:** each head's learned starts (the last 8 per mode), its start counts and its last 20 forecast errors are kept in `.storage/climate_adaptivepid_supervisor.<entry_id>`. It is saved a minute after each start and when Home Assistant stops, read before the entities are created (so the counts never drop to 0, which statistics would take as a reset), and deleted with the entry. Old starts leave only as new ones replace them, never with time, so last winter's heating starts are there for the first forecast in autumn. A head removed from the configuration is dropped at the next save; an unreadable file is ignored and learning starts again.
@@ -78,6 +87,7 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - `switch.<name>_supervisor_enabled` (restored across restarts): while off, nothing is sent.
 - `binary_sensor.<name>_outdoor_unit_running`: diagnostic, any head operating.
 - `binary_sensor.<name>_mode_conflict`: diagnostic, heads in opposite modes for 10 minutes.
+- Per head, diagnostic: `sensor.<name>_<room>_recovery_time` (minutes to target now, 0 when there, unknown without the model or out of reach; the model and outdoor temperature as attributes) and `sensor.<name>_<room>_recovery_forecast_error` (the last timed recovery's actual minus predicted minutes, with both, the mean absolute error over the saved recoveries and the one being timed as attributes).
 - Per hinted room:
   - `binary_sensor.<name>_<room>_shared_heat`: other heads only.
   - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat`, `shared_heat_expected` or `disabled`, with the reason and `expected_in_s` as attributes.
@@ -94,6 +104,7 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - **The start statistics:** stacking both ways, forecast scoring from 3 min out, stale and missing forecasts, and the counts restored across a restart.
 - **The mode conflict:** heat against cool or dry only, reported after 10 minutes and not for a brief switch-over, cleared at once.
 - **Repair issues** for a missing `Operating` sensor, removed at unload.
+- **Recovery:** the estimate with and without heat loss, out of reach, cooling, the timing after a raise and what drops it, saving, and the °C/h rates converted for a °F Home Assistant.
 - **Diagnostics:** serialisable, with the plan, the hints sent and the statistics.
 - **The disable switch.**
 - **A head offline.**
