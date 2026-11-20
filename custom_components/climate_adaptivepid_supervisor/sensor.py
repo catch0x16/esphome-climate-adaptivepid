@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import RestoreSensor, SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -79,29 +79,18 @@ class HeadStatsEntity(SupervisorEntity, SensorEntity):
         return self.coordinator.stats.head(self._climate)
 
 
-class _RestoredCount(HeadStatsEntity, RestoreSensor):
-    """A count that only goes up, carried across restarts."""
+class _Count(HeadStatsEntity):
+    """A count that only goes up; the coordinator keeps it across restarts."""
 
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _field: str
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_sensor_data()
-        if last is None or last.native_value is None:
-            return
-        try:
-            restored = int(float(last.native_value))
-        except (TypeError, ValueError):
-            return
-        setattr(self.stats, self._field, getattr(self.stats, self._field) + restored)
 
     @property
     def native_value(self) -> int:
         return getattr(self.stats, self._field)
 
 
-class HeadStarts(_RestoredCount):
+class HeadStarts(_Count):
     """Every start of the head (an off to on edge of Operating)."""
 
     _attr_translation_key = "starts"
@@ -111,7 +100,7 @@ class HeadStarts(_RestoredCount):
         super().__init__(coordinator, climate, "starts")
 
 
-class HeadStackedStarts(_RestoredCount):
+class HeadStackedStarts(_Count):
     """Starts within STACK_WINDOW_S of another head's start, before or after."""
 
     _attr_translation_key = "stacked_starts"

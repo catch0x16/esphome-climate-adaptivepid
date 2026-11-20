@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass, replace
 from datetime import timedelta
 import logging
@@ -13,6 +14,7 @@ from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -23,7 +25,9 @@ from .const import (
     CONF_HINTED,
     OPERATING_NAME,
     RENEW_SECONDS,
+    SAVE_DELAY_SECONDS,
     SHARED_HEAT_VALID_SECONDS,
+    STORAGE_VERSION,
 )
 from .logic import Head, OperatingHold, RoomPlan, StartPredictor, StartStats, outdoor_unit_running, plan
 
@@ -74,6 +78,11 @@ def resolve_head(hass: HomeAssistant, climate_entity_id: str) -> HeadEntities:
     return HeadEntities(climate=climate_entity_id, operating=operating, node=node)
 
 
+def make_store(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
+    """Where one outdoor unit's learned starts and statistics are kept."""
+    return Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}")
+
+
 class SupervisorCoordinator:
     """Event-driven: recomputes on any head change, and renews hints every minute."""
 
@@ -92,8 +101,37 @@ class SupervisorCoordinator:
         self.predictors: dict[str, StartPredictor] = {}
         self.holds: dict[str, OperatingHold] = {}
         self.stats = StartStats()
+        self._store = make_store(hass, entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
+
+    async def async_load(self) -> None:
+        """Restores the learned starts and statistics of the configured heads."""
+        try:
+            data = await self._store.async_load()
+        except Exception as err:  # noqa: BLE001 - a bad file must not stop the supervisor
+            _LOGGER.warning("Could not read the saved starts; learning again: %s", err)
+            data = None
+        heads = data.get("heads") if isinstance(data, dict) else None
+        if not isinstance(heads, dict):
+            return
+        for climate in self.heads:
+            saved = heads.get(climate)
+            if not isinstance(saved, dict):
+                continue
+            self.predictors.setdefault(climate, StartPredictor()).load(saved.get("predictor"))
+            self.stats.head(climate).load(saved.get("stats"))
+
+    def _data(self) -> dict[str, Any]:
+        return {
+            "heads": {
+                climate: {
+                    "predictor": self.predictors[climate].to_dict() if climate in self.predictors else {},
+                    "stats": self.stats.head(climate).to_dict(),
+                }
+                for climate in self.heads
+            }
+        }
 
     async def async_start(self) -> None:
         for climate in self.heads:
@@ -114,6 +152,7 @@ class SupervisorCoordinator:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
+        await self._store.async_save(self._data())
 
     @callback
     def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -168,6 +207,7 @@ class SupervisorCoordinator:
             predictor = self.predictors.setdefault(climate, StartPredictor())
             if predictor.observe(now, head):
                 self.stats.start(now, climate)
+                self._store.async_delay_save(self._data, SAVE_DELAY_SECONDS)
             hold = self.holds.setdefault(climate, OperatingHold())
             heads[climate] = replace(head, operating=hold.update(now, head.operating))
             expected[climate] = predictor.expected_in_s(now, heads[climate])

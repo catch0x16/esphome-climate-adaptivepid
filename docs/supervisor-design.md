@@ -44,7 +44,7 @@ For each head, the integration finds its `Operating` binary sensor and its ESPHo
 | Any operating | `shared_heat` on |
 | None operating, another predicted to start within 5 min | `shared_heat` off, `shared_heat_expected` in seconds |
 
-**Forecast.** The primary bedroom isn't under start control and starts at a steady deficit below its target (0.22–0.37 °C, median 0.32, over 62 starts). For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. The history is in memory, so after a Home Assistant restart forecasts resume after 4 starts.
+**Forecast.** The primary bedroom isn't under start control and starts at a steady deficit below its target (0.22–0.37 °C, median 0.32, over 62 starts). For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. Heat and cool starts are learned separately. The history is saved (see **Saved state** below), so forecasts carry on after a Home Assistant restart.
 
 Only starts reached by drifting are learned:
 - **A start within 10 minutes of a target or mode change** was commanded (a schedule raising the target starts the head at once, a full degree below it) and is not learned.
@@ -66,6 +66,8 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 
 **Head side.** The device YAML defines the action, calling the climate's `set_shared_heat_hint(active, valid_for_s)`. Without the hint, each head's local detector decides (see [start-control-design.md](start-control-design.md#independence)).
 
+**Saved state:** each head's learned starts (the last 8 per mode), its start counts and its last 20 forecast errors are kept in `.storage/climate_adaptivepid_supervisor.<entry_id>`. It is saved a minute after each start and when Home Assistant stops, read before the entities are created (so the counts never drop to 0, which statistics would take as a reset), and deleted with the entry. Old starts leave only as new ones replace them, never with time, so last winter's heating starts are there for the first forecast in autumn. A head removed from the configuration is dropped at the next save; an unreadable file is ignored and learning starts again.
+
 **Entities:**
 - `switch.<name>_supervisor_enabled` (restored across restarts): while off, nothing is sent.
 - `binary_sensor.<name>_outdoor_unit_running`: diagnostic, any head operating.
@@ -76,7 +78,7 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
   - `sensor.<name>_<room>_starts`: every start (an off-to-on edge of `Operating`; not one across a gap). Counts up and is restored across restarts, so long-term statistics give starts per day.
   - `sensor.<name>_<room>_stacked_starts`: starts within 5 min of another head's start, before or after; both starts count. Same kind of count. Fewer stacked starts per day is what the forecast is for.
   - `sensor.<name>_<room>_start_forecast_error`: the last start's actual minus forecast time in seconds (positive: later than forecast), scored against the latest forecast made at least 3 min ahead. Unknown when that start was not forecast.
-  - `sensor.<name>_<room>_start_forecast_hit_rate`: the share of the last 20 forecast starts within 2 min of the forecast, with the unforecast starts as an attribute. In memory: it starts again after a restart.
+  - `sensor.<name>_<room>_start_forecast_hit_rate`: the share of the last 20 forecast starts within 2 min of the forecast, with the unforecast starts as an attribute.
 
 **Tests** (`tests/supervisor/`, run with `pytest-homeassistant-custom-component` in an isolated environment, see the README):
 - **The decision rules.**

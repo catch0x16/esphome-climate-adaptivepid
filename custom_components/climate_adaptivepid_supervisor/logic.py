@@ -27,7 +27,9 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import math
 import statistics
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -101,7 +103,9 @@ class OperatingHold:
 class StartPredictor:
     """Learns where one head starts, and forecasts its next start."""
 
-    deficits: deque[float] = field(default_factory=lambda: deque(maxlen=START_HISTORY))
+    # Per mode ("heat", "cool"): how far past its target the room was at the
+    # last starts, in the direction it drifts (below while heating).
+    deficits: dict[str, deque[float]] = field(default_factory=dict)
     samples: deque[tuple[float, float]] = field(default_factory=deque)
     # None: not known yet, or after a gap (an edge across a gap is not a start
     # or a stop: the head may have started or stopped at any time in it).
@@ -134,7 +138,7 @@ class StartPredictor:
             and head.target is not None
         ):
             sign = 1.0 if head.mode == "heat" else -1.0
-            self.deficits.append(sign * (head.target - head.room))
+            self.history(head.mode).append(sign * (head.target - head.room))
         if head.operating is False and self.operating is not False:
             # A stop, or a gap that ended stopped (it may have just stopped).
             self.last_stop = now
@@ -146,16 +150,35 @@ class StartPredictor:
                 self.samples.popleft()
         return started
 
+    def history(self, mode: str) -> deque[float]:
+        """The learned deficits of one mode."""
+        return self.deficits.setdefault(mode, deque(maxlen=START_HISTORY))
+
+    def to_dict(self) -> dict[str, Any]:
+        """What is kept across restarts: the learned deficits."""
+        return {"deficits": {mode: list(values) for mode, values in self.deficits.items() if values}}
+
+    def load(self, data: Any) -> None:
+        """Restores what to_dict saved; anything malformed is skipped."""
+        deficits = data.get("deficits") if isinstance(data, dict) else None
+        if not isinstance(deficits, dict):
+            return
+        for mode in ("heat", "cool"):
+            values = _floats(deficits.get(mode), START_HISTORY, limit=MAX_DEFICIT)
+            if values:
+                self.history(mode).extend(values)
+
     def expected_in_s(self, now: float, head: Head) -> float | None:
         """Seconds until the head is predicted to start, or None."""
         if head.operating is not False or head.mode not in ("heat", "cool") or head.room is None or head.target is None:
             return None
-        if len(self.deficits) < MIN_STARTS:
+        deficits = self.deficits.get(head.mode, ())
+        if len(deficits) < MIN_STARTS:
             return None
         if self.last_stop is not None and now - self.last_stop < AFTER_STOP_S:
             return None
         sign = 1.0 if head.mode == "heat" else -1.0
-        level = head.target - sign * statistics.median(self.deficits)
+        level = head.target - sign * statistics.median(deficits)
         # How far the room still has to go, in the direction it drifts.
         to_go = sign * (head.room - level)
         if to_go <= 0.0:
@@ -181,6 +204,25 @@ HIT_WITHIN_S = 120.0
 STALE_FORECAST_S = 600.0
 # The hit rate is over this many recent forecast starts.
 SCORE_HISTORY = 20
+# Saved values beyond these are not plausible and are not restored.
+MAX_DEFICIT = 5.0
+MAX_ERROR_S = 3600.0
+
+
+def _floats(values: Any, keep: int, limit: float) -> list[float]:
+    """The last `keep` finite numbers within +-limit of a saved list."""
+    if not isinstance(values, list):
+        return []
+    good = [
+        float(v)
+        for v in values
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and abs(v) <= limit
+    ]
+    return good[-keep:]
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 @dataclass
@@ -197,6 +239,24 @@ class HeadStats:
     # Actual minus forecast start (s) of the last start; None if it had no forecast.
     last_error_s: float | None = None
     errors: deque[float] = field(default_factory=lambda: deque(maxlen=SCORE_HISTORY))
+
+    def to_dict(self) -> dict[str, Any]:
+        """What is kept across restarts: the counts and the recent forecast errors."""
+        return {
+            "starts": self.starts,
+            "stacked": self.stacked,
+            "unforecast": self.unforecast,
+            "errors": list(self.errors),
+        }
+
+    def load(self, data: Any) -> None:
+        """Restores what to_dict saved; anything malformed is skipped."""
+        if not isinstance(data, dict):
+            return
+        self.starts = _count(data.get("starts"))
+        self.stacked = min(_count(data.get("stacked")), self.starts)
+        self.unforecast = min(_count(data.get("unforecast")), self.starts)
+        self.errors.extend(_floats(data.get("errors"), SCORE_HISTORY, limit=MAX_ERROR_S))
 
     @property
     def hit_rate(self) -> float | None:

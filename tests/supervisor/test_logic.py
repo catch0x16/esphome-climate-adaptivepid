@@ -6,6 +6,7 @@ from custom_components.climate_adaptivepid_supervisor.logic import (
     UNKNOWN_HOLD_S,
     Head,
     OperatingHold,
+    HeadStats,
     StartPredictor,
     StartStats,
     outdoor_unit_running,
@@ -133,14 +134,14 @@ def test_no_forecast_right_after_a_stop():
 def test_a_gap_is_not_a_start():
     """An Operating sensor that drops out and comes back on is not a start."""
     predictor, now = learned_predictor()
-    learned = list(predictor.deficits)
+    learned = list(predictor.deficits["heat"])
     predictor.observe(now + 60, Head(name="primary", operating=None, mode="heat", room=19.60, target=19.72))
     predictor.observe(now + 120, primary(19.65, operating=True))  # back, mid-run
-    assert list(predictor.deficits) == learned
+    assert list(predictor.deficits["heat"]) == learned
     # The next real start is learned again.
     predictor.observe(now + 700, primary(19.80))
     predictor.observe(now + 1300, primary(19.40, operating=True))
-    assert len(predictor.deficits) == len(learned) + 1
+    assert len(predictor.deficits["heat"]) == len(learned) + 1
 
 
 def test_a_gap_that_ends_stopped_counts_as_a_stop():
@@ -161,23 +162,23 @@ def test_no_forecast_for_a_head_in_a_gap():
 
 def test_a_start_after_a_target_change_is_not_learned():
     predictor, now = learned_predictor()
-    learned = list(predictor.deficits)
+    learned = list(predictor.deficits["heat"])
     raised = 19.72 + 0.56  # the sunrise automation: +1 F
     predictor.observe(now + 600, Head(name="primary", operating=False, mode="heat", room=19.70, target=raised))
     predictor.observe(now + 660, Head(name="primary", operating=True, mode="heat", room=19.70, target=raised))
-    assert list(predictor.deficits) == learned
+    assert list(predictor.deficits["heat"]) == learned
     # Long after the change, starts are learned again.
     predictor.observe(now + 2000, Head(name="primary", operating=False, mode="heat", room=20.40, target=raised))
     predictor.observe(now + 3000, Head(name="primary", operating=True, mode="heat", room=19.96, target=raised))
-    assert predictor.deficits[-1] == pytest.approx(0.32)
+    assert predictor.deficits["heat"][-1] == pytest.approx(0.32)
 
 
 def test_a_start_after_a_mode_change_is_not_learned():
     predictor, now = learned_predictor()
-    learned = list(predictor.deficits)
+    learned = list(predictor.deficits["heat"])
     predictor.observe(now + 600, Head(name="primary", operating=False, mode="cool", room=19.70, target=19.72))
     predictor.observe(now + 660, Head(name="primary", operating=True, mode="cool", room=20.20, target=19.72))
-    assert list(predictor.deficits) == learned
+    assert list(predictor.deficits["heat"]) == learned
 
 
 def test_operating_hold_bridges_short_gaps_only():
@@ -231,3 +232,44 @@ def test_unforecast_and_stale_forecasts():
     stats.forecast(1000, "primary", None)  # 700 s past it: dropped
     stats.start(1100, "primary")
     assert head.unforecast == 2 and head.last_error_s is None
+
+
+def test_cooling_does_not_use_heating_starts():
+    predictor, now = learned_predictor()
+    for minute in range(11):
+        predictor.observe(now + 60 * minute, primary(19.60 - 0.02 * minute))
+    cooling = Head(name="primary", operating=False, mode="cool", room=20.0, target=19.72)
+    assert predictor.expected_in_s(now + 600, cooling) is None
+
+
+def test_predictor_saved_and_restored():
+    predictor, now = learned_predictor()
+    restored = StartPredictor()
+    restored.load(predictor.to_dict())
+    assert restored.deficits["heat"] == predictor.deficits["heat"]
+    for minute in range(11):
+        restored.observe(now + 60 * minute, primary(19.60 - 0.02 * minute))
+    assert restored.expected_in_s(now + 600, primary(19.38)) == 0.0  # forecasts at once
+
+
+def test_malformed_saves_are_skipped():
+    predictor = StartPredictor()
+    predictor.load({"deficits": {"heat": [0.3, "x", None, True, float("nan"), 99.0, 0.31], "dry": [0.1]}})
+    assert list(predictor.deficits["heat"]) == [0.3, 0.31] and "dry" not in predictor.deficits
+    for junk in (None, [], {"deficits": [1, 2]}):
+        StartPredictor().load(junk)
+    stats = HeadStats()
+    stats.load({"starts": 10, "stacked": 50, "unforecast": -3, "errors": [30, 1e9, "a", -45.5]})
+    assert (stats.starts, stats.stacked, stats.unforecast) == (10, 10, 0)
+    assert list(stats.errors) == [30.0, -45.5]
+    HeadStats().load("junk")
+
+
+def test_stats_saved_and_restored():
+    stats = StartStats()
+    stats.forecast(0, "primary", 200.0)
+    stats.start(230, "primary")
+    stats.start(300, "main")
+    restored = HeadStats()
+    restored.load(stats.head("primary").to_dict())
+    assert (restored.starts, restored.stacked, list(restored.errors)) == (1, 1, [30.0])

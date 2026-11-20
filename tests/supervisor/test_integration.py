@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from freezegun.api import FrozenDateTimeFactory
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_fire_time_changed,
-    mock_restore_cache_with_extra_data,
-)
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.util import dt as dt_util
 
@@ -21,14 +18,16 @@ from custom_components.climate_adaptivepid_supervisor.const import (
     CONF_HINTED,
     DOMAIN,
     SHARED_HEAT_VALID_SECONDS,
+    STORAGE_VERSION,
 )
 
 from .conftest import FakeHouse
 
 
-async def setup_supervisor(hass: HomeAssistant, house: FakeHouse) -> MockConfigEntry:
+async def setup_supervisor(hass: HomeAssistant, house: FakeHouse, entry_id: str | None = None) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
+        entry_id=entry_id,
         title="Outdoor unit",
         data={
             CONF_HEADS: [h.climate for h in house.heads.values()],
@@ -113,7 +112,7 @@ async def test_operating_dropout_keeps_shared_heat(
     house.set_operating("primary", True)
     await hass.async_block_till_done()
     predictor = entry.runtime_data.predictors[house.heads["primary"].climate]
-    learned = list(predictor.deficits)  # the real start
+    learned = list(predictor.deficits["heat"])  # the real start
     house.heads["hailee"].calls.clear()
     hass.states.async_set(house.heads["primary"].operating, "unavailable")
     await hass.async_block_till_done()
@@ -122,7 +121,7 @@ async def test_operating_dropout_keeps_shared_heat(
     # Back, still running: not learned as a start.
     house.set_operating("primary", True)
     await hass.async_block_till_done()
-    assert list(predictor.deficits) == learned
+    assert list(predictor.deficits["heat"]) == learned
     # Gone for good: after the hold it no longer counts as running.
     hass.states.async_set(house.heads["primary"].operating, "unavailable")
     await hass.async_block_till_done()
@@ -158,20 +157,51 @@ async def test_start_statistics(hass: HomeAssistant, house: FakeHouse, freezer: 
     assert hit_rate.attributes["unforecast_starts"] == 1
 
 
-async def test_start_counts_restored(hass: HomeAssistant, house: FakeHouse) -> None:
-    prefix = "sensor.outdoor_unit_haileesbedroomhvac_hvac"
-    mock_restore_cache_with_extra_data(
-        hass,
-        [
-            (State(f"{prefix}_starts", "41"), {"native_value": 41, "native_unit_of_measurement": None}),
-            (State(f"{prefix}_stacked_starts", "7"), {"native_value": 7, "native_unit_of_measurement": None}),
-        ],
-    )
-    await setup_supervisor(hass, house)
-    house.set_operating("hailee", True)
+async def test_learned_starts_kept_across_restarts(
+    hass: HomeAssistant, house: FakeHouse, hass_storage: dict[str, Any]
+) -> None:
+    primary = house.heads["primary"].climate
+    hass_storage[f"{DOMAIN}.saved"] = {
+        "version": STORAGE_VERSION,
+        "key": f"{DOMAIN}.saved",
+        "data": {
+            "heads": {
+                primary: {
+                    "predictor": {"deficits": {"heat": [0.3, 0.32, 0.33, 0.31]}},
+                    "stats": {"starts": 41, "stacked": 7, "unforecast": 2, "errors": [20.0, -200.0]},
+                },
+                "climate.gone": {"stats": {"starts": 5}},
+            }
+        },
+    }
+    entry = await setup_supervisor(hass, house, entry_id="saved")
+    coordinator = entry.runtime_data
+    assert list(coordinator.predictors[primary].deficits["heat"]) == [0.3, 0.32, 0.33, 0.31]
+    prefix = "sensor.outdoor_unit_primarybedroomhvac_hvac"
+    assert hass.states.get(f"{prefix}_starts").state == "41"
+    assert hass.states.get(f"{prefix}_stacked_starts").state == "7"
+    assert hass.states.get(f"{prefix}_start_forecast_hit_rate").state == "50.0"
+
+    house.set_operating("primary", True)
     await hass.async_block_till_done()
     assert hass.states.get(f"{prefix}_starts").state == "42"
-    assert hass.states.get(f"{prefix}_stacked_starts").state == "7"
+    # Saved at unload, without the head that is no longer configured.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    saved = hass_storage[f"{DOMAIN}.saved"]["data"]["heads"]
+    assert saved[primary]["stats"]["starts"] == 42
+    assert "climate.gone" not in saved
+    # Removing the entry removes its file.
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert f"{DOMAIN}.saved" not in hass_storage
+
+
+async def test_unreadable_save_starts_fresh(
+    hass: HomeAssistant, house: FakeHouse, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[f"{DOMAIN}.junk"] = {"version": STORAGE_VERSION, "key": f"{DOMAIN}.junk", "data": ["junk"]}
+    await setup_supervisor(hass, house, entry_id="junk")
+    assert hass.states.get("sensor.outdoor_unit_primarybedroomhvac_hvac_starts").state == "0"
 
 
 async def test_head_offline_does_not_stop_others(hass: HomeAssistant, house: FakeHouse) -> None:

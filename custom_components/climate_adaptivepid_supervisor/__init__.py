@@ -12,7 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import PLATFORMS
-from .coordinator import SupervisorCoordinator
+from .coordinator import SupervisorCoordinator, make_store
 
 type SupervisorConfigEntry = ConfigEntry[SupervisorCoordinator]
 
@@ -20,6 +20,8 @@ type SupervisorConfigEntry = ConfigEntry[SupervisorCoordinator]
 async def async_setup_entry(hass: HomeAssistant, entry: SupervisorConfigEntry) -> bool:
     coordinator = SupervisorCoordinator(hass, entry)
     entry.runtime_data = coordinator
+    # Before the entities exist, so the restored counts are their first state.
+    await coordinator.async_load()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await coordinator.async_start()
     entry.async_on_unload(entry.add_update_listener(_async_reload))
@@ -33,3 +35,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SupervisorConfigEntry) 
 
 async def _async_reload(hass: HomeAssistant, entry: SupervisorConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: SupervisorConfigEntry) -> None:
+    await make_store(hass, entry.entry_id).async_remove()
