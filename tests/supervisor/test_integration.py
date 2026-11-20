@@ -5,10 +5,14 @@ from __future__ import annotations
 from datetime import timedelta
 
 from freezegun.api import FrozenDateTimeFactory
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    mock_restore_cache_with_extra_data,
+)
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.util import dt as dt_util
 
@@ -127,6 +131,47 @@ async def test_operating_dropout_keeps_shared_heat(
         async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done()
     assert house.calls("hailee")[-1] == ("shared_heat", {"active": False, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
+
+
+async def test_start_statistics(hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory) -> None:
+    await setup_supervisor(hass, house)
+    house.set_operating("hailee", True)
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=2))
+    house.set_operating("primary", True)
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=30))
+    house.set_operating("main", True)
+    await hass.async_block_till_done()
+
+    def state(entity_id: str) -> str:
+        return hass.states.get(entity_id).state
+
+    prefix = "sensor.outdoor_unit_"
+    assert state(f"{prefix}haileesbedroomhvac_hvac_starts") == "1"
+    assert state(f"{prefix}haileesbedroomhvac_hvac_stacked_starts") == "1"
+    assert state(f"{prefix}primarybedroomhvac_hvac_stacked_starts") == "1"
+    assert state(f"{prefix}mainfloorhvac_hvac_stacked_starts") == "0"
+    assert state(f"{prefix}mainfloorhvac_hvac_start_forecast_error") == "unknown"
+    assert state(f"{prefix}mainfloorhvac_hvac_start_forecast_hit_rate") == "unknown"
+    hit_rate = hass.states.get(f"{prefix}mainfloorhvac_hvac_start_forecast_hit_rate")
+    assert hit_rate.attributes["unforecast_starts"] == 1
+
+
+async def test_start_counts_restored(hass: HomeAssistant, house: FakeHouse) -> None:
+    prefix = "sensor.outdoor_unit_haileesbedroomhvac_hvac"
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (State(f"{prefix}_starts", "41"), {"native_value": 41, "native_unit_of_measurement": None}),
+            (State(f"{prefix}_stacked_starts", "7"), {"native_value": 7, "native_unit_of_measurement": None}),
+        ],
+    )
+    await setup_supervisor(hass, house)
+    house.set_operating("hailee", True)
+    await hass.async_block_till_done()
+    assert hass.states.get(f"{prefix}_starts").state == "42"
+    assert hass.states.get(f"{prefix}_stacked_starts").state == "7"
 
 
 async def test_head_offline_does_not_stop_others(hass: HomeAssistant, house: FakeHouse) -> None:

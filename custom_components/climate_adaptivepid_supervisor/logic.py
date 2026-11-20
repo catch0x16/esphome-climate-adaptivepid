@@ -111,8 +111,11 @@ class StartPredictor:
     mode: str | None = None
     last_change: float | None = None
 
-    def observe(self, now: float, head: Head) -> None:
-        """Called on every state change and renewal with the head's state."""
+    def observe(self, now: float, head: Head) -> bool:
+        """Called on every state change and renewal with the head's state.
+
+        True when the head started (an off to on edge, not one across a gap).
+        """
         if head.target is not None:
             if self.target is not None and head.target != self.target:
                 self.last_change = now
@@ -122,9 +125,9 @@ class StartPredictor:
                 self.last_change = now
             self.mode = head.mode
         commanded = self.last_change is not None and now - self.last_change < AFTER_CHANGE_S
+        started = bool(head.operating) and self.operating is False
         if (
-            head.operating
-            and self.operating is False
+            started
             and not commanded
             and head.mode in ("heat", "cool")
             and head.room is not None
@@ -141,6 +144,7 @@ class StartPredictor:
                 self.samples.append((now, head.room))
             while self.samples and now - self.samples[0][0] > 2 * SLOPE_WINDOW_S:
                 self.samples.popleft()
+        return started
 
     def expected_in_s(self, now: float, head: Head) -> float | None:
         """Seconds until the head is predicted to start, or None."""
@@ -164,6 +168,85 @@ class StartPredictor:
         if fall < MIN_FALL_PER_S:
             return None
         return to_go / fall
+
+
+# Two heads starting within this of each other stack their runs.
+STACK_WINDOW_S = 300.0
+# A start is scored against the forecast made at least this far ahead of it
+# (the latest such), and is a hit within HIT_WITHIN_S of it.
+SCORE_LEAD_S = 180.0
+HIT_WITHIN_S = 120.0
+# A forecast start this far in the past without a start is dropped (a miss is
+# then an unforecast start).
+STALE_FORECAST_S = 600.0
+# The hit rate is over this many recent forecast starts.
+SCORE_HISTORY = 20
+
+
+@dataclass
+class HeadStats:
+    """How one head's starts went: counts, stacking and forecast accuracy."""
+
+    starts: int = 0
+    stacked: int = 0
+    unforecast: int = 0
+    last_start: float | None = None
+    last_start_stacked: bool = False
+    # When the latest forecast at least SCORE_LEAD_S ahead expects the start.
+    forecast_at: float | None = None
+    # Actual minus forecast start (s) of the last start; None if it had no forecast.
+    last_error_s: float | None = None
+    errors: deque[float] = field(default_factory=lambda: deque(maxlen=SCORE_HISTORY))
+
+    @property
+    def hit_rate(self) -> float | None:
+        """Percent of recent forecast starts within HIT_WITHIN_S; None before any."""
+        if not self.errors:
+            return None
+        hits = sum(1 for error in self.errors if abs(error) <= HIT_WITHIN_S)
+        return round(100.0 * hits / len(self.errors), 1)
+
+
+@dataclass
+class StartStats:
+    """Start counts, stacking and forecast scoring across the heads of one unit."""
+
+    heads: dict[str, HeadStats] = field(default_factory=dict)
+
+    def head(self, key: str) -> HeadStats:
+        return self.heads.setdefault(key, HeadStats())
+
+    def forecast(self, now: float, key: str, seconds: float | None) -> None:
+        """Called with each head's forecast while it is not running."""
+        stats = self.head(key)
+        if stats.forecast_at is not None and now - stats.forecast_at > STALE_FORECAST_S:
+            stats.forecast_at = None
+        if seconds is not None and seconds >= SCORE_LEAD_S:
+            stats.forecast_at = now + seconds
+
+    def start(self, now: float, key: str) -> None:
+        """Called when a head starts."""
+        stats = self.head(key)
+        stats.starts += 1
+        stacked = False
+        for other_key, other in self.heads.items():
+            if other_key == key or other.last_start is None or now - other.last_start > STACK_WINDOW_S:
+                continue
+            stacked = True
+            if not other.last_start_stacked:
+                other.stacked += 1
+                other.last_start_stacked = True
+        if stacked:
+            stats.stacked += 1
+        stats.last_start = now
+        stats.last_start_stacked = stacked
+        if stats.forecast_at is not None and now - stats.forecast_at <= STALE_FORECAST_S:
+            stats.last_error_s = now - stats.forecast_at
+            stats.errors.append(stats.last_error_s)
+        else:
+            stats.last_error_s = None
+            stats.unforecast += 1
+        stats.forecast_at = None
 
 
 def outdoor_unit_running(heads: dict[str, Head]) -> bool:

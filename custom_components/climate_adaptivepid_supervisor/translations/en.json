@@ -35,11 +35,17 @@
   },
   "entity": {
     "switch": {
-      "enabled": { "name": "Supervisor enabled" }
+      "enabled": {
+        "name": "Supervisor enabled"
+      }
     },
     "binary_sensor": {
-      "outdoor_unit_running": { "name": "Outdoor unit running" },
-      "shared_heat": { "name": "{room} shared heat" }
+      "outdoor_unit_running": {
+        "name": "Outdoor unit running"
+      },
+      "shared_heat": {
+        "name": "{room} shared heat"
+      }
     },
     "sensor": {
       "supervisor_action": {
@@ -50,6 +56,18 @@
           "shared_heat_expected": "Shared heat expected",
           "disabled": "Disabled"
         }
+      },
+      "starts": {
+        "name": "{room} starts"
+      },
+      "stacked_starts": {
+        "name": "{room} stacked starts"
+      },
+      "start_forecast_error": {
+        "name": "{room} start forecast error"
+      },
+      "start_forecast_hit_rate": {
+        "name": "{room} start forecast hit rate"
       }
     }
   }

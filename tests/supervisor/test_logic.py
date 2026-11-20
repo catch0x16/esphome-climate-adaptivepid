@@ -7,6 +7,7 @@ from custom_components.climate_adaptivepid_supervisor.logic import (
     Head,
     OperatingHold,
     StartPredictor,
+    StartStats,
     outdoor_unit_running,
     plan,
     plan_room,
@@ -187,3 +188,46 @@ def test_operating_hold_bridges_short_gaps_only():
     assert hold.update(11 + UNKNOWN_HOLD_S, None) is None  # gone too long: not known
     assert hold.update(400, False) is False
     assert OperatingHold().update(0, None) is None  # never known
+
+
+def test_observe_reports_starts_but_not_gaps():
+    predictor = StartPredictor()
+    assert predictor.observe(0, primary(19.7)) is False  # first sight: not an edge
+    assert predictor.observe(60, primary(19.4, operating=True)) is True
+    assert predictor.observe(120, Head(name="primary", operating=None, mode="heat")) is False
+    assert predictor.observe(180, primary(19.6, operating=True)) is False
+
+
+def test_starts_within_the_window_are_stacked_both_ways():
+    stats = StartStats()
+    stats.start(0, "hailee")
+    stats.start(200, "primary")  # 3.3 min after Hailee: both stacked
+    stats.start(250, "main")  # stacks too; the others are counted once
+    stats.start(2000, "hailee")  # alone
+    assert (stats.head("hailee").starts, stats.head("hailee").stacked) == (2, 1)
+    assert stats.head("primary").stacked == 1
+    assert stats.head("main").stacked == 1
+
+
+def test_forecast_scored_from_at_least_three_minutes_out():
+    stats = StartStats()
+    stats.forecast(0, "primary", 400.0)  # expects 400
+    stats.forecast(100, "primary", 290.0)  # expects 390, still >= 3 min out
+    stats.forecast(250, "primary", 130.0)  # too close to score: ignored
+    stats.start(420, "primary")
+    head = stats.head("primary")
+    assert head.last_error_s == 30.0 and head.hit_rate == 100.0 and head.unforecast == 0
+    stats.forecast(1000, "primary", 200.0)
+    stats.start(1500, "primary")  # 300 s late: a miss
+    assert head.last_error_s == 300.0 and head.hit_rate == 50.0
+
+
+def test_unforecast_and_stale_forecasts():
+    stats = StartStats()
+    stats.start(0, "primary")
+    head = stats.head("primary")
+    assert head.last_error_s is None and head.unforecast == 1 and head.hit_rate is None
+    stats.forecast(100, "primary", 200.0)  # expects 300
+    stats.forecast(1000, "primary", None)  # 700 s past it: dropped
+    stats.start(1100, "primary")
+    assert head.unforecast == 2 and head.last_error_s is None

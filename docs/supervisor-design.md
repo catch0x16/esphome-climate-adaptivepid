@@ -72,11 +72,17 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - Per hinted room:
   - `binary_sensor.<name>_<room>_shared_heat`: other heads only.
   - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat`, `shared_heat_expected` or `disabled`, with the reason and `expected_in_s` as attributes.
+- Per head, diagnostic, to measure whether the coordination works:
+  - `sensor.<name>_<room>_starts`: every start (an off-to-on edge of `Operating`; not one across a gap). Counts up and is restored across restarts, so long-term statistics give starts per day.
+  - `sensor.<name>_<room>_stacked_starts`: starts within 5 min of another head's start, before or after; both starts count. Same kind of count. Fewer stacked starts per day is what the forecast is for.
+  - `sensor.<name>_<room>_start_forecast_error`: the last start's actual minus forecast time in seconds (positive: later than forecast), scored against the latest forecast made at least 3 min ahead. Unknown when that start was not forecast.
+  - `sensor.<name>_<room>_start_forecast_hit_rate`: the share of the last 20 forecast starts within 2 min of the forecast, with the unforecast starts as an attribute. In memory: it starts again after a restart.
 
 **Tests** (`tests/supervisor/`, run with `pytest-homeassistant-custom-component` in an isolated environment, see the README):
 - **The decision rules.**
 - **The hint lifecycle:** sent when another head starts, renewed, cleared when it stops, never for the room's own run.
 - **The forecast:** learned from the other heads' starts, sent within 5 min, cleared when the head starts; skipped for a head without the action.
+- **The start statistics:** stacking both ways, forecast scoring from 3 min out, stale and missing forecasts, and the counts restored across a restart.
 - **The disable switch.**
 - **A head offline.**
 - **The config flow.**

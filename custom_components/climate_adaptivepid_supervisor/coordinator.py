@@ -25,7 +25,7 @@ from .const import (
     RENEW_SECONDS,
     SHARED_HEAT_VALID_SECONDS,
 )
-from .logic import Head, OperatingHold, RoomPlan, StartPredictor, outdoor_unit_running, plan
+from .logic import Head, OperatingHold, RoomPlan, StartPredictor, StartStats, outdoor_unit_running, plan
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,6 +91,7 @@ class SupervisorCoordinator:
         self._no_expected_action: set[str] = set()
         self.predictors: dict[str, StartPredictor] = {}
         self.holds: dict[str, OperatingHold] = {}
+        self.stats = StartStats()
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
 
@@ -165,10 +166,12 @@ class SupervisorCoordinator:
         for climate, head in reported.items():
             # The predictor sees gaps as gaps; the plan bridges short ones.
             predictor = self.predictors.setdefault(climate, StartPredictor())
-            predictor.observe(now, head)
+            if predictor.observe(now, head):
+                self.stats.start(now, climate)
             hold = self.holds.setdefault(climate, OperatingHold())
             heads[climate] = replace(head, operating=hold.update(now, head.operating))
             expected[climate] = predictor.expected_in_s(now, heads[climate])
+            self.stats.forecast(now, climate, expected[climate])
         self.outdoor_running = outdoor_unit_running(heads)
         self.plans = plan(heads, self.hinted, expected)
         if self.enabled:
