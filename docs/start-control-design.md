@@ -2,13 +2,14 @@
 
 **Status: implemented** (`pid: start_control`, off by default). Enabled on the second bedroom ("Hailee's room").
 
-Start control replaces "round the PID's output to the device's step and send it" with an explicit state machine. The PID supplies demand; the state machine decides when the unit starts and stops, and when to switch a head off because heat is leaking in from other heads on a shared outdoor unit.
+Start control replaces "round the PID's output to the device's step and send it" with an explicit mapping. The PID's output is compared with the room temperature the way the unit compares its setpoint with it, and the matching one of three setpoint levels is sent. A state machine tracks what the unit does with that level, and switches a head off when heat is leaking in from other heads on a shared outdoor unit.
 
 The measurements behind every rule here are in [research/shared-outdoor-unit.md](research/shared-outdoor-unit.md).
 
 ## Contents
 
 - [Why](#why)
+- [Levels](#levels)
 - [States](#states)
 - [Transitions](#transitions)
 - [Shared heat](#shared-heat)
@@ -23,33 +24,45 @@ The measurements behind every rule here are in [research/shared-outdoor-unit.md]
 
 ## Why
 
-A Mitsubishi head compares its setpoint with its own view of the room, the remote temperature rounded to 0.5 °C:
+A Mitsubishi head compares its setpoint with the exact remote temperature it is sent (the room temperature, R), although it reports that temperature back rounded to its 0.5 °C step (the reported temperature):
 
-| Setpoint − view | Unit |
+| Setpoint | Unit |
 |---|---|
-| ≥ 0 | starts within about 10 s |
-| −0.5 | keeps running; a stopped unit restarts on its own after its anti-short-cycle timer (about 6.2 min) |
-| ≤ −1.0 | stays off; a running unit stops within about 10 s |
+| ≥ R | starts within about 20 s |
+| reported − 0.5 | keeps running; a stopped unit restarts on its own after its anti-short-cycle timer (about 6.2 min) |
+| reported − 1.0 | stays off; a running unit stops within about 10 s |
 
-The PID assumes the unit's output varies smoothly with the setpoint offset, but it really has three levels. Rounding its output onto that grid has two effects:
+Across 2026-11-18/19, every start with the setpoint at or above R ran within about 20 s (15 of 15). With R 0.08–0.16 above the setpoint, the unit waited 3–4 minutes or never started (7 of 7). An earlier version started at the reported temperature, so whenever R was just above a step it stalled.
 
-- **Accidental starts:** a correction of a few hundredths can cross a rounding boundary and start a full run. Where the boundary falls depends on the integral, kp and the target's position on the grid, not on any rule.
-- **Accidental restarts:** an idle setpoint left at −0.5 lets the unit restart on its own timer.
+The PID assumes the unit's output varies smoothly with the setpoint, but it really has those three levels. Rounding its output onto the 0.5 grid made starts depend on where the grid fell relative to the target, not on R:
 
-In a small room, a start adds +0.8 to +1.2 °C, so starts at −0.2 to −0.4 overshoot every time.
+- **Accidental starts:** a correction of a few hundredths can cross a rounding boundary and start a full run.
+- **Accidental restarts:** a setpoint left at −0.5 lets the unit restart on its own timer.
 
 Heads on a shared outdoor unit add a second problem. While another head runs, an idle head that is still powered keeps receiving refrigerant, and its fan carries the heat into the room. In Hailee's room that is +0.16 °C/min. Lowering the setpoint doesn't stop it; switching the head off does.
 
+## Levels
+
+Every update (2 s), the PID's output O (the setpoint it would send if the unit took any value, bounded to target − `max_adjustment_under` … target + `max_adjustment_over`) is compared with R. When cooling, every sign is mirrored.
+
+| O compared with R | Level | Setpoint sent |
+|---|---|---|
+| O ≥ R | start | the 0.5 step at or above R (20.08 → 20.5, 20.00 → 20.0) |
+| R − 0.5 ≤ O < R | running | reported − 0.5 |
+| O < R − 0.5 | off | reported − 1.0 |
+
+The 0.5 is `stop_band` (one step). A level is left for a lower one only once O is 0.05 past the boundary (`level_deadband`), so noise on R doesn't flip it: a start is dropped at O < R − 0.05, and a run stopped at O < R − 0.55.
+
+With the integral at zero, O − R = (1 + kp)(target − R). With kp = 0.75 a run starts once the room reaches the target, and holds the running level until the room is about 0.3 past it. The integral then moves both points: a room that averages past the target pulls them down, one that averages short pushes them up.
+
 ## States
 
-The setpoint is always relative to the unit's view. When cooling, every sign is mirrored.
-
-| State | Device | Setpoint | Purpose |
+| State | Device | Setpoint | Meaning |
 |---|---|---|---|
-| IDLE | on | view − 2 steps (−1.0) | Off, and can't restart on its timer |
-| START | on | view | Start now |
-| RUN | on | view at start − 1 step (−0.5) | Lowest demand; the unit stops by itself as soon as its view moves one step |
-| PARKED | off | — (the IDLE level is used to switch on) | Blocks heat leaking in from other heads |
+| IDLE | on | off level; the running level while the PID asks for it and nothing holds the head back | Not running |
+| START | on | the level asked for (start level) | A start was asked for; the run isn't confirmed yet |
+| RUN | on | start or running level (the running level is held within `min_run`) | Running |
+| PARKED | off | — (the off level is used to switch on) | Blocks heat leaking in from other heads |
 
 A step is the device's setpoint step (0.5 on these units).
 
@@ -59,25 +72,26 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 
 | From → to | Trigger | Action |
 |---|---|---|
-| IDLE → START | demand ≥ `start_threshold`, **and** no shared heat, **and** the room isn't rising (≥ 0.02 °C/min over 2 min), **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding, **and** not deferred (below) | setpoint = view |
-| IDLE (deferred) | a start is due, **but** the supervisor forecasts shared heat within 5 min, **and** the room is less than 0.5 short of the target, **and** the deferral has lasted less than 6 min | no start; integral frozen. Ends when the heat arrives, the forecast is dropped, at the 0.5 floor, or after 6 min |
-| START → RUN | the unit has reported `operating` for 60 s without a break (right after power-on a unit can report running for ~20 s and stop; until confirmed the start setpoint stays and the start doesn't time out while the unit reports running) | setpoint = view at start − 1 step |
-| START → IDLE | no `operating` within `start_timeout` (default 5 min) | idle setpoint |
-| START → IDLE | shared heat starts | idle setpoint |
-| RUN → IDLE | the unit stops by itself | idle setpoint |
-| RUN → IDLE (early stop) | at least 2 minutes running, **and** room + learned coast ≥ target | idle setpoint (the unit stops within 10 s) |
-| RUN → IDLE | shared heat starts | idle setpoint |
-| RUN → IDLE | at least 2 minutes running, **and** shared heat forecast within 2 min | idle setpoint |
-| IDLE → RUN | the unit runs without a START, more than 60 s after the last commanded stop | tracked as a run (logged as unrequested) |
-| START/RUN → IDLE | hysteresis is holding (room past `off_threshold`, waiting out `off_delay`) | idle setpoint |
+| IDLE → START | start level, **and** no shared heat, **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding, **and** not deferred (below) | start level |
+| IDLE (deferred) | a start is due, **but** the supervisor forecasts shared heat within 5 min, **and** the room is less than 0.5 short of the target, **and** the deferral has lasted less than 6 min | off level. Ends when the heat arrives, the forecast is dropped, at the 0.5 floor, or after 6 min |
+| START → RUN | the unit has reported `operating` for 60 s without a break (right after power-on a unit can report running for ~20 s and stop; until confirmed the start is kept) | level asked for |
+| START → IDLE | the PID no longer asks for a start and the unit never ran | no stop is counted, so the minimum cycle doesn't apply |
+| START (fault) | 15 min with no run (`start_fault_ms`) | logged once at WARNING; the start is kept |
+| START → IDLE | shared heat starts | off level |
+| RUN → IDLE | the unit stops by itself | — |
+| RUN → IDLE (PID stop) | off level, **and** at least 2 minutes since the start (`min_run`) | off level (the unit stops within 10 s) |
+| RUN → IDLE | shared heat starts | off level |
+| RUN → IDLE | at least 2 minutes running, **and** shared heat forecast within 2 min | off level |
+| IDLE → RUN | the unit runs without a START, more than 60 s after the last commanded stop (for example on its own timer at the running level) | tracked as a run (logged as unrequested) |
+| START/RUN → IDLE | hysteresis is holding (room past `off_threshold`, waiting out `off_delay`) | off level |
 | IDLE → PARKED | shared heat **and** room > target + `off_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device off (at once, no `off_delay`) |
 | any → PARKED | the device is off (parked, or cut by hysteresis after `off_delay` / past `off_limit`) | — |
-| PARKED → IDLE | room < target − `on_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device on at the idle setpoint, never the target |
+| PARKED → IDLE | room < target − `on_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device on at the off level, never the target |
 | PARKED → IDLE (catch) | room more than 0.1 short of the target, **and** shared heat arriving or forecast within 5 min, **and** ≥ `min_cycle_duration` since the last power change | switch the device on, so its fan brings in the other head's heat |
 
-**Demand** is the PID's output minus the target (target minus output when cooling): how much more output the PID asks for. Because it includes the integral, a room that has been below target for a long time starts sooner.
+In IDLE, the off level is also sent within 60 s (`stop_grace`) of a commanded stop, and while shared heat is on or forecast, so the unit isn't left free to restart on its own timer.
 
-**The integral** accumulates only while IDLE. It is frozen in START, RUN and PARKED, while the controller holds the output below what the PID asks for. While PARKED the PID keeps running, unlike the regular path, which resets it when the device is off, so demand is current once the head is switched back on.
+**The integral** accumulates in IDLE, START and RUN, so it follows the room through whole cycles. It is frozen only while PARKED. While PARKED the PID keeps running (unlike the regular path, which resets it when the device is off), so its output is current once the head is switched back on. It resets when the target changes, and stops accumulating at either output bound.
 
 **Power follows the hysteresis band.** Parking and unparking use the hysteresis settings, so start control has no thresholds of its own for power:
 - **Inside the band** (between target − `on_threshold` and target + `off_threshold`) the head stays powered. While another head runs it takes the leak instead of switching off and on for every small rise.
@@ -107,9 +121,11 @@ It turns off once the room has stopped moving (≤ 0.01 °C/min over 2 minutes),
 
 | Value | Measured as | Used for | Default |
 |---|---|---|---|
-| Gain (alone) | peak − room at start | `start_threshold` = kp × gain / 2 (clamped to 0.2…3.0, and below `max_adjustment_over`) | the configured `start_threshold` |
-| Coast (alone, shared) | peak − room at stop | early stop: room + coast ≥ target | 0.3 alone, 0.6 shared |
+| Gain (alone, shared) | peak − room at start | logged only | — |
+| Coast (alone, shared) | peak − room at stop | logged only | 0.3 alone, 0.6 shared |
 | Coast time | peak time − stop time | detector eligibility | 5 min |
+
+Gain and coast no longer drive any decision: the PID's output decides when to start and stop. They are still learned and logged, as a record of how each run behaved.
 
 - **Smoothing:** each sample moves the estimate 30% of the way.
 - **Minimum data:** a learned value is used after 3 runs.
@@ -123,9 +139,9 @@ climate:
   - platform: climate_adaptivepid
     humidity_sensor: dht_humidity      # optional; confirms shared heat
     pid:
-      max_adjustment_over: 1.0         # must exceed start_threshold
+      max_adjustment_under: 1.0        # the PID's output stays within target - 1.0 ...
+      max_adjustment_over: 0.5         # ... target + 0.5
       start_control: true
-      start_threshold: 0.5             # PID demand that starts a run, C
     hysteresis:                        # required with start_control
       on_threshold: 0.25               # a parked head is switched back on (idle) this far below target
       off_threshold: 0.4               # parked this far past target (at once with shared heat)
@@ -135,27 +151,26 @@ climate:
 ```
 
 Validation rejects:
-- **`start_threshold` at or above `max_adjustment_over`:** demand is capped there, so the unit could never start.
+- **`start_threshold`, `start_timeout` and the `start_threshold_sensor`:** removed; the PID's output decides when a run starts and how long a start is held.
 - **`start_control` without `hysteresis`.**
 - **`park_when_shared`, `park_margin` and the `leak_rate` sensor:** removed; parking follows the hysteresis band.
 
 **Diagnostics** (created only with start control):
 - **`Control state`:** 0 IDLE, 1 START, 2 RUN, 3 PARKED.
-- **`Start threshold`:** the one in use, learned or configured.
 - **`Shared heat`.**
 
-Every transition is logged at INFO with room, target, demand, the threshold, the unit's view, and the shared-heat source.
+Every transition is logged at INFO with room, target, the PID's output, the level, the setpoint sent, the reported temperature, and the shared-heat source.
 
 ## What it changes elsewhere
 
 | Setting | With start control |
 |---|---|
-| `setpoint_deadband`, directional rounding | Not used: the three levels are already on the grid (`internalSetDeviceTemperature` rounds to nearest, without a deadband). Still used by rooms without start control. |
+| `setpoint_deadband`, directional rounding | Not used: the three levels are already on the grid (`internalSetDeviceTemperature` rounds to nearest, without a deadband); `level_deadband` keeps the level from flipping instead. Still used by rooms without start control. |
 | Hysteresis `on_threshold` | Where the start controller switches a parked head back on (idle). Hysteresis itself never switches the head on. |
 | Hysteresis `off_threshold` | Where the head is parked: at once with shared heat (start controller), otherwise by the hysteresis step after `off_delay`. A cut counts as PARKED. |
 | Hysteresis `off_delay` / `off_limit` (hold) | Apply without shared heat; while holding, a run is stopped and none is started. |
-| Switching to HEAT/COOL | The device is switched on at the idle setpoint, not the target. |
-| Reboot with HEAT and the device off | Left off. The start controller switches it on when demand calls for it. |
+| Switching to HEAT/COOL | The device is switched on at the off level, not the target. |
+| Reboot with HEAT and the device off | Left off. The start controller switches it on at `on_threshold`. |
 | `run_backoff`, `increase_rate` | Removed: RUN replaces `run_backoff`, and `increase_rate` shaped a continuous setpoint that is no longer sent. |
 
 ## Supervisor hints
@@ -175,17 +190,17 @@ The head makes every power decision itself; the hints only tell it, for certain,
 |---|---|
 | Supervisor stopped or disabled | Its hint expires within 2 minutes; the local detector takes over |
 | Home Assistant unavailable | As above. The room temperature falls back to the unit's own sensor after `ha_temperature_timeout_minutes` (device YAML) |
-| Unit reports no temperature | The room temperature, rounded to the step, stands in for the unit's view |
+| Unit reports no temperature | The room temperature, rounded to the step, stands in for the reported temperature |
 | `start_control: false` | Exactly the PID path as before |
 
 ## Code
 
 | File | Role |
 |---|---|
-| `start_controller.h` | State machine (pure, tested natively) |
+| `start_controller.h` | Levels and state machine (pure, tested natively) |
 | `shared_heat_detector.h` | Local detector and hint expiry (pure) |
-| `burst_learner.h` | Gain and coast learning (pure) |
-| `pid_workflowstep.cpp` (`runStartControl`) | Wiring: PID demand, detector, learner and controller; applies power and setpoints |
+| `burst_learner.h` | Gain and coast learning (pure); coast time for the detector, the rest logged |
+| `pid_workflowstep.cpp` (`runStartControl`) | Wiring: the PID's output, detector, learner and controller; applies power and setpoints |
 | `climate_device_adapter.cpp` | `internalTurnOnAt` (switch on at a given setpoint) and `internalSetDeviceTemperature` (exact level, no deadband) |
 | `hysterisis_workflowstep.*` | The cut after `off_delay` and the hold; `setTurnOnEnabled(false)` under start control |
 | `climate_adaptivepid.*`, `climate.py` | Options, diagnostics, persistence, hint methods, power-on at the idle setpoint |
@@ -193,20 +208,19 @@ The head makes every power decision itself; the hints only tell it, for certain,
 ## Verification
 
 - **Native tests** (`uv run python tests/run_native.py`):
-  - **`test_start_controller.cpp`:** the three levels, IDLE after every stop, starts on demand only (not on a small deficit, mid-coast, with shared heat, or while hysteresis holds), the minimum cycle, early stop after the minimum run, a lagging `operating` report not counted as an unrequested start, staying powered inside the band, parking past `off_threshold` on shared heat and unparking past `on_threshold` with throttling, the hysteresis cut as PARKED, a hold stopping a run or start, and cooling.
+  - **`test_start_controller.cpp`:** the level at the O − R boundaries and the deadband, the start level from R (20.08 → 20.5, 19.92 → 20.0, 20.00 → 20.0), the running level, the PID stop only after `min_run`, the off level within `stop_grace`, a restart at the running level tracked as a run, the minimum cycle, no start with shared heat or while hysteresis holds, run confirmation, the start fault, deferral, catch and stopping for expected heat, staying powered inside the band, parking past `off_threshold` on shared heat and unparking past `on_threshold` with throttling, a hold stopping a run or start, the integral frozen only while parked, and cooling.
   - **`test_shared_heat_detector.cpp`:** detection with and without humidity, rejection when humidity is steady, eligibility, cooling, and hint expiry.
   - **`test_burst_learner.cpp`:** gain and coast alone vs shared, discarding coasts cut short and starts that never ran, and restoring state.
 - **Host scenario:** `tests/fixtures/start_control.yaml`, a smoke test of idle power-on, staying powered on shared heat inside the band, parking at once past `off_threshold` on shared heat, unparking at `on_threshold`, and the hysteresis cut after `off_delay` without shared heat.
-- **Live checks for Hailee's room**, against 16–18 November:
-  - every start is preceded by a START log line,
-  - no timer restarts at −0.5,
-  - median peak at most +0.4,
-  - hysteresis cuts near 0,
-  - parks happen at `off_threshold` while other heads run,
-  - fewer power cycles than the 18 November band (about 1.6 an hour), with the room inside target ± 0.5.
+- **Live checks for Hailee's room**, against 2026-11-18/19:
+  - every start level is followed by `operating` within about 20 s,
+  - the share of the night within ±0.25, above +0.5 and below −0.5, and the warmest and coldest,
+  - runs ended by the PID against runs the unit ended itself,
+  - kp and the integral settle rather than sitting on a bound.
 
 ## Open questions
 
-- **Early stop timing:** the minimum run before an early stop (2 minutes) and the shared-coast default are guesses until a few nights are learned.
-- **Learning start against stop:** with the unit stopping itself at a one-step rise, the learned gain mostly reflects where the unit's view crosses a 0.5 boundary. If peaks stay high, the next lever is to start later: a lower demand cap, or `start_threshold` from the *shared* gain when other heads are known to be running.
+- **Peaks while the integral learns:** with the integral near zero a run starts at the target and holds to about +0.3, then coasts. Until the integral pulls the start in (ki ≈ 0.00036/s on Hailee's room, about an hour per 0.4 °C), peaks can run higher than with the old learned coast stop.
+- **Adaptive kp:** the retune can move kp between 0.25 and 4. The higher it is, the closer the start and stop points, and the more the cycle length rests on `min_run` and `min_cycle_duration`.
+- **The running level while stopped:** in IDLE the running level lets the unit restart on its own timer when the PID asks for a little heat. Whether that helps or just adds short runs needs a night of data.
 - **Cooling:** the bands are measured for heating. Cooling is mirrored by assumption.

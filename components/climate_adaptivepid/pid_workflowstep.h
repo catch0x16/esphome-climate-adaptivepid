@@ -32,7 +32,6 @@ namespace workflow {
             workflow::start::StartController startCtl;
             workflow::start::SharedHeatDetector detector;
             workflow::start::BurstLearner bursts;
-            float effectiveStartThreshold{NAN};
 
             void runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager);
             TuningConfig tuning;
@@ -87,7 +86,6 @@ namespace workflow {
             bool isStartControl() const { return this->startControl; }
             workflow::start::HeadState startState() const { return this->startCtl.state(); }
             bool sharedHeat() const;
-            float startThreshold() const { return this->effectiveStartThreshold; }
             const workflow::start::BurstState &burstState() const { return this->bursts.state(); }
             void restoreBurstState(const workflow::start::BurstState &state) { this->bursts.set_state(state); }
             void resetBurstState() { this->bursts.reset(); }

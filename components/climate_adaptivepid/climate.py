@@ -87,21 +87,20 @@ PID_SCHEMA = cv.Schema(
         cv.Optional(CONF_SETPOINT_DEADBAND, default=0.1): cv.float_range(
             min=0.0, max=1.0
         ),
-        # Start control (docs/start-control-design.md): the PID supplies demand,
-        # and a state machine decides when the unit starts, sending one of three
-        # setpoints relative to the unit's own view of the room. For units whose
-        # thermostat starts at setpoint >= its view and stops at <= view - 1.0.
+        # Start control (docs/start-control-design.md): the PID's output is
+        # compared with the room temperature sent to the unit, and one of three
+        # setpoint levels is sent: start (the step at or above the room), keep
+        # running (one step below the unit's reported temperature) or off (two
+        # steps below). For units whose thermostat starts once its setpoint
+        # reaches the remote temperature.
         cv.Optional(CONF_START_CONTROL, default=False): cv.boolean,
-        # PID demand (output - target, C) that starts a run. Learned from the
-        # room's response once there are enough runs.
-        cv.Optional(CONF_START_THRESHOLD, default=0.5): cv.float_range(
-            min=0.1, max=3.0
+        cv.Optional(CONF_START_THRESHOLD): cv.invalid(
+            f"{CONF_START_THRESHOLD} was removed: under {CONF_START_CONTROL} a run "
+            "starts once the PID's output reaches the room temperature"
         ),
-        # How long a start is held for the unit to start its compressor before
-        # going back to idle. The units can take minutes to act on a start.
-        cv.Optional(CONF_START_TIMEOUT, default="5min"): cv.All(
-            cv.positive_time_period_milliseconds,
-            cv.Range(min=cv.TimePeriod(seconds=30), max=cv.TimePeriod(minutes=15)),
+        cv.Optional(CONF_START_TIMEOUT): cv.invalid(
+            f"{CONF_START_TIMEOUT} was removed: under {CONF_START_CONTROL} a start "
+            "is held for as long as the PID's output asks for it"
         ),
         # Parking follows the hysteresis band under start control: the head is
         # switched off past off_threshold (at once while heat arrives from other
@@ -140,18 +139,6 @@ PID_SCHEMA = cv.Schema(
     }
 )
 
-
-def _validate_start_control(conf):
-    if conf[CONF_START_CONTROL] and conf[CONF_START_THRESHOLD] >= conf[CONF_MAX_ADJUSTMENT_OVER]:
-        raise cv.Invalid(
-            f"{CONF_START_THRESHOLD} must be below {CONF_MAX_ADJUSTMENT_OVER}: the PID's "
-            "demand is capped there, so the unit could never start",
-            path=[CONF_START_THRESHOLD],
-        )
-    return conf
-
-
-PID_SCHEMA = cv.All(PID_SCHEMA, _validate_start_control)
 
 
 def _gain_sensor_schema(decimals, unit=None):
@@ -293,9 +280,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_CONTROL_STATE, default={CONF_NAME: "Control state"}
             ): _gain_sensor_schema(0),
-            cv.Optional(
-                CONF_START_THRESHOLD_SENSOR, default={CONF_NAME: "Start threshold"}
-            ): _gain_sensor_schema(2, "°C"),
+            cv.Optional(CONF_START_THRESHOLD_SENSOR): cv.invalid(
+                f"{CONF_START_THRESHOLD_SENSOR} was removed along with the start threshold"
+            ),
             cv.Optional(CONF_LEAK_RATE): cv.invalid(
                 f"{CONF_LEAK_RATE} was removed along with learned parking"
             ),
@@ -349,8 +336,6 @@ async def to_code(config):
         cg.add(var.set_max_adjustment_over(conf[CONF_MAX_ADJUSTMENT_OVER]))
         cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
         cg.add(var.set_start_control(conf[CONF_START_CONTROL]))
-        cg.add(var.set_start_threshold(conf[CONF_START_THRESHOLD]))
-        cg.add(var.set_start_timeout(conf[CONF_START_TIMEOUT]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))
@@ -407,11 +392,11 @@ async def to_code(config):
             ):
                 cg.add(setter(await sensor.new_sensor(config[key])))
         if config[CONF_PID][CONF_START_CONTROL]:
-            for key, setter in (
-                (CONF_CONTROL_STATE, var.set_control_state_sensor),
-                (CONF_START_THRESHOLD_SENSOR, var.set_start_threshold_sensor),
-            ):
-                cg.add(setter(await sensor.new_sensor(config[key])))
+            cg.add(
+                var.set_control_state_sensor(
+                    await sensor.new_sensor(config[CONF_CONTROL_STATE])
+                )
+            )
             cg.add(
                 var.set_shared_heat_sensor(
                     await binary_sensor.new_binary_sensor(config[CONF_SHARED_HEAT])

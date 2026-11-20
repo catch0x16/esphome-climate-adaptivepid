@@ -363,8 +363,6 @@ void ClimateAdaptivePID::setup() {
     }
     if (this->start_control_) {
       workflow::start::StartConfig config;
-      config.start_threshold = this->start_threshold_;
-      config.start_timeout_ms = this->start_timeout_ms_;
       config.on_threshold = this->hysteresis_on_;
       config.off_threshold = this->hysteresis_off_;
       config.min_cycle_ms = this->min_cycle_ms_;
@@ -762,7 +760,6 @@ void ClimateAdaptivePID::publish_diagnostics_() {
     publish_value(this->dead_time_cooling_sensor_, m.cool_dead_s / 60.0f);
     if (this->pid_step_->isStartControl()) {
       publish_value(this->control_state_sensor_, static_cast<float>(this->pid_step_->startState()));
-      publish_value(this->start_threshold_sensor_, this->pid_step_->startThreshold());
       publish_binary(this->shared_heat_sensor_, this->pid_step_->sharedHeat());
     }
   }
@@ -778,8 +775,8 @@ void ClimateAdaptivePID::dump_config() {
                   this->ki_, this->kd_, this->max_adjustment_under_, this->max_adjustment_over_,
                   this->setpoint_deadband_);
     if (this->start_control_) {
-      ESP_LOGCONFIG(TAG, "  Start control: start threshold %.2f, on below -%.2f, park past +%.2f, humidity: %s",
-                    this->start_threshold_, this->hysteresis_on_, this->hysteresis_off_,
+      ESP_LOGCONFIG(TAG, "  Start control: PID output vs room, on below -%.2f, park past +%.2f, humidity: %s",
+                    this->hysteresis_on_, this->hysteresis_off_,
                     this->humidity_sensor_ != nullptr ? "sensor" : "none");
     }
     if (this->tuning_.adaptive) {

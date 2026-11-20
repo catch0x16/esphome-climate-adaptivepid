@@ -51,7 +51,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_dead_time_heating_sensor(sensor::Sensor *sensor) { this->dead_time_heating_sensor_ = sensor; }
   void set_dead_time_cooling_sensor(sensor::Sensor *sensor) { this->dead_time_cooling_sensor_ = sensor; }
   void set_control_state_sensor(sensor::Sensor *sensor) { this->control_state_sensor_ = sensor; }
-  void set_start_threshold_sensor(sensor::Sensor *sensor) { this->start_threshold_sensor_ = sensor; }
   void set_shared_heat_sensor(binary_sensor::BinarySensor *sensor) { this->shared_heat_sensor_ = sensor; }
 
   void set_update_interval(uint32_t value) { this->update_interval_ = value; }
@@ -66,8 +65,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_setpoint_deadband(float value) { this->setpoint_deadband_ = value; }
   // Start control (docs/start-control-design.md).
   void set_start_control(bool value) { this->start_control_ = value; }
-  void set_start_threshold(float value) { this->start_threshold_ = value; }
-  void set_start_timeout(uint32_t value) { this->start_timeout_ms_ = value; }
   void set_pid_adaptive(bool value) { this->tuning_.adaptive = value; }
   void set_pid_response_time(uint32_t ms) { this->tuning_.response_time_s = ms / 1000.0f; }
   void set_pid_dead_time(uint32_t ms) { this->tuning_.dead_time_s = ms / 1000.0f; }
@@ -212,7 +209,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   sensor::Sensor *dead_time_heating_sensor_{nullptr};
   sensor::Sensor *dead_time_cooling_sensor_{nullptr};
   sensor::Sensor *control_state_sensor_{nullptr};
-  sensor::Sensor *start_threshold_sensor_{nullptr};
   binary_sensor::BinarySensor *shared_heat_sensor_{nullptr};
 
   climate::ClimateTraits traits_;
@@ -254,8 +250,6 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   float max_adjustment_over_{2.0f};
   float setpoint_deadband_{0.0f};
   bool start_control_{false};
-  float start_threshold_{0.5f};
-  uint32_t start_timeout_ms_{300000};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
   float hysteresis_off_limit_{NAN};

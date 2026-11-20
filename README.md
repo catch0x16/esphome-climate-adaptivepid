@@ -72,7 +72,7 @@ climate:
 | `ready_sensor` | none | Optional binary sensor; while it is off the workflows are paused. |
 | `outdoor_temperature_sensor` | none | Outdoor temperature for the room model's heat loss. Without it heat loss is not learned and is left out of the heating and cooling rates. |
 | `humidity_sensor` | none | Room humidity. With start control it confirms heat arriving from other heads on a shared outdoor unit (warm supply air dries the room). |
-| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`, `start_threshold`, `start_timeout`; see [Start control](#start-control). |
+| `pid` | disabled | `kp`, `ki`, `kd`, and how far the device setpoint may move below/above the target (`max_adjustment_under` / `max_adjustment_over`), and `setpoint_deadband`. See [PID gains](#pid-gains). Start control: `start_control`; see [Start control](#start-control). |
 | `hysteresis` | disabled | Switch the device off once the room is `off_threshold` past the target and back on once it is `on_threshold` short of it, at most once per `min_cycle_duration`. With `off_delay` (default `0s`) a room past `off_threshold` is first held: the PID is pulled to its least output (target minus `max_adjustment_under` while heating) with its integral frozen, and the device is switched off only if the room is still past the threshold after `off_delay`, or at once past `off_limit` (default `off_threshold` + 0.5). Room sensors near the unit read past the target for a few minutes after each run; the delay keeps those brief peaks from forcing a full power-on start. |
 
 At least one of `pid` and `hysteresis` is required. The standard climate
@@ -89,8 +89,8 @@ or reconfigured under its key (`internal_power`, `device_power`, `operating`,
 `device_current_temperature`, `device_set_point`, `pid_set_point`, `pid_kp`,
 `pid_ki`, `heating_rate`, `cooling_rate`, `heat_loss`, `dead_time_heating`,
 `dead_time_cooling`). With start control there are also `Control state`
-(0 IDLE, 1 START, 2 RUN, 3 PARKED), `Start threshold` and `Shared heat`
-(`control_state`, `start_threshold_sensor`, `shared_heat`). Anything device-specific, such as
+(0 IDLE, 1 START, 2 RUN, 3 PARKED) and `Shared heat`
+(`control_state`, `shared_heat`). Anything device-specific, such as
 compressor frequency or energy, comes from the inner climate's own sensors.
 
 ### PID gains
@@ -135,21 +135,35 @@ an outdoor unit. Off by default; the full design is in
 measurements behind it in
 [docs/research/shared-outdoor-unit.md](docs/research/shared-outdoor-unit.md).
 
-A Mitsubishi head compares its setpoint with its own view of the room (the
-remote temperature, rounded to 0.5°C). At its view or above it starts within
-seconds; 0.5°C below it keeps running, and a stopped unit restarts on its own
+A Mitsubishi head compares its setpoint with the exact remote temperature it
+is sent (the room temperature), although it reports it back rounded to 0.5°C.
+At or above the room temperature it starts within seconds; 0.5°C below the
+reported temperature it keeps running, and a stopped unit restarts on its own
 once its anti-short-cycle timer allows; 1.0°C below it stays off. Rounding a
 continuous PID output onto that grid turns small corrections into full starts.
 
-With `start_control: true` the PID only supplies demand, and a state machine
-sends one of three setpoints relative to the unit's view:
+With `start_control: true` the PID's output (bounded by `max_adjustment_under`
+and `max_adjustment_over`) is compared with the room temperature every update,
+the way the unit compares its setpoint with it, and drives the setpoint across
+those three levels:
 
-| State | Setpoint | Entered when |
+| PID output | Level | Setpoint sent |
 |---|---|---|
-| IDLE | view − 1.0 | after every stop; the unit stays off |
-| START | view | the PID's demand reaches `start_threshold`, no heat is arriving from other heads, and the room isn't still rising |
-| RUN | view at start − 0.5 | the unit has reported running for 60 s (a shorter spell keeps the start setpoint); it stops by itself once its view moves one step, or is stopped early when the predicted peak reaches the target |
-| PARKED | device off | the room is `off_threshold` past the target: at once while heat arrives from other heads, otherwise after the hysteresis `off_delay` (or at once past `off_limit`) |
+| at or above the room | start | the 0.5°C step at or above the room (20.08 → 20.5) |
+| up to 0.5°C below the room | running | reported temperature − 0.5 |
+| more than 0.5°C below the room | off | reported temperature − 1.0 |
+
+A level is left for a lower one only once the output is 0.05°C past the
+boundary, so noise on the room reading doesn't flip it. The integral runs
+through whole cycles, so a room that averages past the target moves the start
+and stop points down. A state machine tracks what the unit does with the level:
+
+| State | Entered when |
+|---|---|
+| IDLE | after every stop; off level, or the running level while the PID asks for it (not within 60 s of a commanded stop, nor while heat arrives or is forecast from other heads) |
+| START | the start level, no heat is arriving from other heads, and at least `min_cycle_duration` since the last stop. Held for as long as the PID asks for it |
+| RUN | the unit has reported running for 60 s (a shorter spell keeps the start). The PID stops it at the off level, not within 2 minutes of the start |
+| PARKED | device off: the room is `off_threshold` past the target, at once while heat arrives from other heads, otherwise after the hysteresis `off_delay` (or at once past `off_limit`) |
 
 A powered head on a shared outdoor unit keeps receiving refrigerant while
 another head runs, and its fan carries that heat into the room. Only switching
@@ -167,13 +181,6 @@ it off stops that, hence PARKED. Power follows the hysteresis band:
 The band width trades comfort for power cycles: a wider band means longer
 stretches powered and longer stretches parked.
 
-- `start_threshold` (default 0.5°C) must be below `max_adjustment_over`. Once a
-  few runs are learned it follows the room: half the learned gain of a start.
-- `start_timeout` (default 5 min, 30 s to 15 min): how long a start is held
-  for the unit to start its compressor before going back to idle. These units
-  can take several minutes to act on a start; with a short timeout the
-  controller gives up, drops to the stay-off level and retries, and the unit
-  may never start. A start also ends if heat starts arriving from other heads.
 - Start control requires `hysteresis`.
 - Heat arriving from other heads is detected on the head itself (the room
   rising while the head is idle and past its own coast, with humidity falling

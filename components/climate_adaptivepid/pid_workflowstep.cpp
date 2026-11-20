@@ -207,27 +207,12 @@ namespace workflow {
             const devicestate::DeviceStatus status = deviceManager->getDeviceStatus();
             const bool operating = powered && status.operating;
 
-            // The PID only supplies demand here. It keeps running while the head
-            // is parked, so demand is current once it is switched back on; its
-            // integral is frozen whenever the controller holds the output below
-            // what it asks for.
+            // The PID's output is the setpoint it asks for; start control compares
+            // it with the room and sends the matching level (start_controller.h).
+            // The PID keeps running while the head is parked, so its output is
+            // current once the head is switched back on; its integral is frozen
+            // only while parked.
             const float output = this->adaptivePID->update(currentTemperature, now, true);
-            const float demand = heating ? output - target : target - output;
-            // Demand is capped at the PID's output limit; a threshold at or past
-            // it could never start the unit.
-            const float demandCap = heating ? adjustedMaxTemp - target : target - adjustedMinTemp;
-
-            // Thresholds: learned values once there are enough runs, else configured.
-            float startThreshold = this->startConfig.start_threshold;
-            const float gain = this->bursts.gain_alone();
-            if (std::isfinite(gain)) {
-                startThreshold = devicestate::clamp(this->adaptivePID->kp() * gain * 0.5f, 0.2f, 3.0f);
-            }
-            if (startThreshold > demandCap - 0.05f) {
-                startThreshold = demandCap - 0.05f;
-            }
-            this->effectiveStartThreshold = startThreshold;
-            this->startCtl.set_start_threshold(startThreshold);
 
             // Shared heat: only while the head is powered, idle and past its own coast.
             const bool eligible = powered && !operating && this->startCtl.state() == HeadState::IDLE &&
@@ -244,11 +229,9 @@ namespace workflow {
             in.device_view = status.currentTemperature;
             in.room = currentTemperature;
             in.target = target;
-            in.demand = demand;
-            in.room_rising = this->detector.rising(now);
+            in.output = output;
             in.shared_heat = shared;
             in.shared_expected_s = this->detector.expected_in_s(now);
-            in.coast = this->bursts.coast(shared);
             in.hold = this->holdLeast && powered;
             const StartDecision decision = this->startCtl.update(in);
             this->adaptivePID->set_integral_frozen(decision.freeze_integral);
@@ -259,11 +242,15 @@ namespace workflow {
                     b.gain[0], static_cast<unsigned>(b.gain_count[0]), b.gain[1], static_cast<unsigned>(b.gain_count[1]),
                     b.coast[0], b.coast[1], b.coast_time_s / 60.0f);
             }
-            if (decision.transition != Transition::NONE) {
-                ESP_LOGI(TAG, "Start control: %s -> %s (room %.2f, target %.2f, demand %.2f / %.2f, unit sees %.1f, shared heat %s%s)",
+            if (decision.transition == Transition::START_FAULT) {
+                ESP_LOGW(TAG, "Start control: %s (room %.2f, PID output %.2f, setpoint %.1f, unit reports %.1f)",
+                    transition_to_string(decision.transition), currentTemperature, output, decision.setpoint,
+                    status.currentTemperature);
+            } else if (decision.transition != Transition::NONE) {
+                ESP_LOGI(TAG, "Start control: %s -> %s (room %.2f, target %.2f, PID output %.2f, %s level, setpoint %.1f, unit reports %.1f, shared heat %s%s)",
                     transition_to_string(decision.transition), head_state_to_string(decision.state),
-                    currentTemperature, target, demand, startThreshold, status.currentTemperature,
-                    YESNO(shared), this->detector.hint_valid(now) ? " (supervisor)" : "");
+                    currentTemperature, target, output, level_to_string(decision.level), decision.setpoint,
+                    status.currentTemperature, YESNO(shared), this->detector.hint_valid(now) ? " (supervisor)" : "");
             }
 
             switch (decision.power) {
@@ -280,9 +267,9 @@ namespace workflow {
                     }
                     break;
             }
-            ESP_LOGD(TAG, "Start control %s: demand %.2f (start %.2f), setpoint %.1f, room %s, shared heat %s, expected in %.0f s",
-                head_state_to_string(decision.state), demand, startThreshold, decision.setpoint,
-                in.room_rising ? "rising" : "steady", YESNO(shared), in.shared_expected_s);
+            ESP_LOGD(TAG, "Start control %s: room %.2f, PID output %.2f (%s level), setpoint %.1f, shared heat %s, expected in %.0f s",
+                head_state_to_string(decision.state), currentTemperature, output, level_to_string(decision.level),
+                decision.setpoint, YESNO(shared), in.shared_expected_s);
         }
 
     }

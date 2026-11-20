@@ -19,8 +19,9 @@ static bool near(float a, float b) { return std::fabs(a - b) <= 0.001f; }
 static const uint32_t S = 1000;
 static const uint32_t MIN = 60 * S;
 
-// Hailee's room: target 20.28, the unit sees 20.0.
-static StartInput idle_input(uint32_t now, float demand) {
+// Hailee's room: target 20.28, room 20.00, the unit reports 20.0.
+// `gap` is the PID's output minus the room (O - R).
+static StartInput input(uint32_t now, float gap) {
   StartInput in;
   in.now_ms = now;
   in.heating = true;
@@ -29,8 +30,14 @@ static StartInput idle_input(uint32_t now, float demand) {
   in.device_view = 20.0f;
   in.room = 20.0f;
   in.target = 20.28f;
-  in.demand = demand;
-  in.coast = 0.3f;
+  in.output = in.room + gap;
+  return in;
+}
+
+// The same, with the room (and the PID's output with it) moved.
+static StartInput at_room(StartInput in, float room, float gap) {
+  in.room = room;
+  in.output = room + gap;
   return in;
 }
 
@@ -38,7 +45,6 @@ static StartInput idle_input(uint32_t now, float demand) {
 static StartController make() {
   StartController c;
   StartConfig cfg;
-  cfg.start_threshold = 0.5f;
   cfg.on_threshold = 0.25f;
   cfg.off_threshold = 0.4f;
   cfg.min_cycle_ms = 60 * S;
@@ -57,149 +63,160 @@ static StartController make_confirming() {
   return c;
 }
 
+// A head started and confirmed running at `now`.
+static StartController running(uint32_t now, float gap) {
+  StartController c = make();
+  c.update(input(now, gap));
+  StartInput in = input(now + 10 * S, gap);
+  in.operating = true;
+  c.update(in);
+  return c;
+}
+
 int main() {
   {
+    // The levels the PID's output asks for, against the room.
     StartController c = make();
-    StartDecision d = c.update(idle_input(0, 0.3f));
-    check(d.state == HeadState::IDLE, "idle: starts idle when powered and not running");
-    check(near(d.setpoint, 19.0f), "idle: setpoint two steps below the unit's view (no timer restart)");
+    StartDecision d = c.update(input(0, -0.6f));
+    check(d.state == HeadState::IDLE && d.level == Level::OFF, "level: output 0.6 below the room is off");
+    check(near(d.setpoint, 19.0f), "off level: two steps below the reported temperature");
     check(!d.freeze_integral, "idle: integral accumulates");
-    // Last night's starts came at demand 0.18 (PID 20.10 vs target 20.28): no start now.
-    d = c.update(idle_input(2 * S, 0.29f));
-    check(d.state == HeadState::IDLE, "idle: a small demand does not start the unit");
-    d = c.update(idle_input(4 * S, 0.5f));
-    check(d.state == HeadState::START && d.transition == Transition::STARTED, "start: demand reaches the threshold");
-    check(near(d.setpoint, 20.0f), "start: setpoint at the unit's view");
-    check(d.freeze_integral, "start: integral frozen");
-    StartInput in = idle_input(14 * S, 0.5f);
-    in.operating = true;
-    in.coast = 0.0f;  // no early stop here: the unit stops by itself
-    d = c.update(in);
-    check(d.state == HeadState::RUN && d.transition == Transition::RUNNING, "run: the unit reports running");
-    check(near(d.setpoint, 19.5f), "run: one step below the view at the start");
-    in.now_ms = 3 * MIN;
-    in.device_view = 20.5f;  // the unit's view moved up a step
-    in.room = 20.2f;
-    d = c.update(in);
-    check(near(d.setpoint, 19.5f), "run: stays on the start view as the unit's view rises (unit stops itself)");
-    in.now_ms = 3 * MIN + 10 * S;
-    in.operating = false;
-    d = c.update(in);
-    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_BY_UNIT, "run: the unit stopped by itself");
-    check(near(d.setpoint, 19.5f), "idle after stop: two steps below the new view, never one");
-    in = idle_input(3 * MIN + 40 * S, 0.6f);
-    d = c.update(in);
-    check(d.state == HeadState::IDLE, "idle: no start within the minimum cycle after a stop");
-    in.now_ms = 5 * MIN;
-    d = c.update(in);
-    check(d.state == HeadState::START, "idle: starts again after the minimum cycle");
+    d = c.update(input(2 * S, -0.49f));
+    check(d.level == Level::KEEP && d.state == HeadState::IDLE, "level: 0.49 below the room is the running level");
+    check(near(d.setpoint, 19.5f), "running level while stopped: one step below the reported temperature");
+    d = c.update(input(4 * S, -0.01f));
+    check(d.level == Level::KEEP && d.state == HeadState::IDLE, "level: just below the room, no start");
+    d = c.update(input(6 * S, 0.0f));
+    check(d.level == Level::START && d.state == HeadState::START && d.transition == Transition::STARTED,
+          "start: the output reaches the room");
+    check(near(d.setpoint, 20.0f), "start level: room 20.00 -> 20.0");
+    check(!d.freeze_integral, "start: integral accumulates");
   }
   {
-    // Early stop: the predicted peak (room + coast) reaches the target.
+    // The start level is the step at or above the room, not the reported
+    // temperature (2026-11-19 19:44: room 20.15, reported 20.0, no start at 20.0).
+    StartController a = make();
+    check(near(a.update(at_room(input(0, 0.2f), 20.08f, 0.2f)).setpoint, 20.5f), "start level: room 20.08 -> 20.5");
+    StartController b = make();
+    check(near(b.update(at_room(input(0, 0.2f), 19.92f, 0.2f)).setpoint, 20.0f), "start level: room 19.92 -> 20.0");
+    StartController e = make();
+    check(near(e.update(at_room(input(0, 0.2f), 20.0f, 0.2f)).setpoint, 20.0f), "start level: room 20.00 -> 20.0");
+  }
+  {
+    // Levels only step down once the output is level_deadband past the boundary.
     StartController c = make();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(10 * S, 0.6f);
+    c.update(input(0, 0.1f));
+    StartDecision d = c.update(input(2 * S, -0.04f));
+    check(d.level == Level::START && d.state == HeadState::START, "deadband: a dip of 0.04 keeps the start");
+    d = c.update(input(4 * S, -0.06f));
+    check(d.level == Level::KEEP && d.state == HeadState::IDLE && d.transition == Transition::STOPPED_PID,
+          "deadband: past 0.05 the start is dropped (the unit never ran)");
+    d = c.update(input(6 * S, 0.0f));
+    check(d.state == HeadState::START, "a start the unit never ran doesn't count as a stop: starts again at once");
+  }
+  {
+    // A run: the PID's output drives the setpoint across the levels.
+    StartController c = running(0, 0.3f);
+    StartInput in = input(30 * S, 0.3f);
     in.operating = true;
-    c.update(in);
-    in.now_ms = 60 * S;
-    in.room = 20.0f;  // +0.3 coast would land at 20.30 >= 20.28
+    in = at_room(in, 20.08f, 0.3f);
     StartDecision d = c.update(in);
-    check(d.state == HeadState::RUN, "early stop: not before the minimum run");
-    in.now_ms = 3 * MIN;
+    check(d.state == HeadState::RUN && near(d.setpoint, 20.5f), "run: start level while the output is past the room");
+    in.now_ms = MIN;
+    in = at_room(in, 20.2f, -0.2f);
     d = c.update(in);
-    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_EARLY, "early stop: predicted peak at target");
-    check(near(d.setpoint, 19.0f), "early stop: idle setpoint stops the compressor");
-    in.now_ms = 3 * MIN + 20 * S;  // the unit still reports running for a few seconds
+    check(d.level == Level::KEEP && near(d.setpoint, 19.5f), "run: running level once the output is below the room");
+    in.now_ms = 90 * S;
+    in = at_room(in, 20.4f, -0.6f);
     d = c.update(in);
-    check(d.state == HeadState::IDLE, "early stop: a lagging 'running' report is not an unrequested start");
-    in.now_ms = 5 * MIN;
+    check(d.level == Level::OFF && d.state == HeadState::RUN && near(d.setpoint, 19.5f),
+          "run: off level asked within min_run; running level held");
+    in.now_ms = 2 * MIN + 10 * S;
+    in.device_view = 20.5f;
     d = c.update(in);
-    check(d.state == HeadState::RUN && d.transition == Transition::UNREQUESTED_START,
-          "unrequested start: running long after a stop is tracked as a run");
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_PID, "run: stopped by the PID after min_run");
+    check(near(d.setpoint, 19.5f), "stopped: off level, two steps below the reported 20.5");
+    in.now_ms = 2 * MIN + 20 * S;  // the unit still reports running for a few seconds
+    d = c.update(in);
+    check(d.state == HeadState::IDLE, "a lagging 'running' report after a stop is not an unrequested start");
+    in.operating = false;
+    in = at_room(in, 20.3f, -0.3f);
+    in.now_ms = 2 * MIN + 40 * S;
+    d = c.update(in);
+    check(near(d.setpoint, 19.5f), "off level within stop_grace of a commanded stop, though the PID asks to keep");
+    in.now_ms = 3 * MIN + 20 * S;
+    d = c.update(in);
+    check(near(d.setpoint, 20.0f), "running level once stop_grace has passed");
+    in.now_ms = 3 * MIN + 30 * S;
+    in.operating = true;  // the unit restarted on its own at the running level
+    d = c.update(in);
+    check(d.state == HeadState::RUN && d.transition == Transition::UNREQUESTED_START, "a restart at the running level is tracked as a run");
   }
   {
-    // No start while the room is still rising, while shared heat arrives, or
-    // while hysteresis holds past its off threshold.
+    // The unit stops itself; the next start waits out the minimum cycle.
+    StartController c = running(0, 0.3f);
+    StartInput in = input(3 * MIN, 0.3f);
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_BY_UNIT, "run: the unit stopped by itself");
+    in.now_ms = 3 * MIN + 30 * S;
+    d = c.update(in);
+    check(d.state == HeadState::IDLE && near(d.setpoint, 19.5f), "no start within the minimum cycle: running level");
+    in.now_ms = 4 * MIN;
+    d = c.update(in);
+    check(d.state == HeadState::START, "starts again after the minimum cycle");
+  }
+  {
+    // No start while shared heat arrives or while hysteresis holds.
     StartController c = make();
-    StartInput in = idle_input(0, 0.7f);
-    in.room_rising = true;
-    check(c.update(in).state == HeadState::IDLE, "no start mid-coast (room rising)");
-    in.room_rising = false;
+    StartInput in = input(0, 0.3f);
     in.shared_heat = true;
-    check(c.update(in).state == HeadState::IDLE, "no start while heat arrives from other heads");
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::IDLE && near(d.setpoint, 19.0f), "no start while heat arrives from other heads; off level");
     in.shared_heat = false;
     in.hold = true;
-    check(c.update(in).state == HeadState::IDLE, "no start while hysteresis holds");
+    d = c.update(in);
+    check(d.state == HeadState::IDLE && near(d.setpoint, 19.0f), "no start while hysteresis holds; off level");
     in.hold = false;
     check(c.update(in).state == HeadState::START, "starts once nothing holds it back");
   }
   {
-    // Shared heat during a run stops it.
-    StartController c = make();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(10 * S, 0.6f);
+    // Shared heat stops a run, and ends a start.
+    StartController c = running(0, 0.3f);
+    StartInput in = input(30 * S, 0.3f);
     in.operating = true;
-    in.room = 19.7f;
-    c.update(in);
-    in.now_ms = 30 * S;
     in.shared_heat = true;
     StartDecision d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "shared heat stops a run");
-  }
-  {
-    // Hailee's room 2026-11-18 19:27-19:34: the unit can take minutes to act on
-    // a start. The start is held, not dropped after a minute.
-    StartController c = make();
-    StartDecision d = c.update(idle_input(0, 0.6f));
-    check(d.state == HeadState::START, "slow start: starts");
-    d = c.update(idle_input(2 * MIN, 0.6f));
-    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "slow start: still held at the view after 2 min");
-    StartInput in = idle_input(4 * MIN, 0.6f);
-    in.device_view = 19.5f;  // the room kept falling
-    d = c.update(in);
-    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "slow start: held at the start view as the view falls");
-    in.now_ms = 4 * MIN + 10 * S;
-    in.operating = true;
-    d = c.update(in);
-    check(d.state == HeadState::RUN && d.transition == Transition::RUNNING, "slow start: runs when the unit starts at 4 min");
-  }
-  {
-    // The default hold ends after 5 min; a configured one at its own value.
-    StartController c = make();
-    c.update(idle_input(0, 0.6f));
-    StartDecision d = c.update(idle_input(5 * MIN - S, 0.6f));
-    check(d.state == HeadState::START, "start timeout: default holds to 5 min");
-    d = c.update(idle_input(5 * MIN, 0.6f));
-    check(d.state == HeadState::IDLE && d.transition == Transition::START_TIMED_OUT, "start timeout: default 5 min");
-    StartConfig cfg = c.config();
-    cfg.start_timeout_ms = 2 * MIN;
-    StartController short_hold;
-    short_hold.configure(cfg);
-    short_hold.update(idle_input(0, 0.6f));
-    d = short_hold.update(idle_input(2 * MIN, 0.6f));
-    check(d.transition == Transition::START_TIMED_OUT, "start timeout: configured value");
-  }
-  {
-    // Heat arriving from other heads ends a start the unit hasn't followed yet.
-    StartController c = make();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(2 * MIN, 0.6f);
+    StartController s = make();
+    s.update(input(0, 0.3f));
+    in = input(2 * MIN, 0.3f);
     in.shared_heat = true;
-    StartDecision d = c.update(in);
-    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "shared heat ends a start");
-    check(near(d.setpoint, 19.0f), "shared heat ends a start: idle setpoint");
+    d = s.update(in);
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED && near(d.setpoint, 19.0f),
+          "shared heat ends a start");
+  }
+  {
+    // A start is held while the PID asks for it; a long one is reported once.
+    StartController c = make();
+    c.update(input(0, 0.3f));
+    StartDecision d = c.update(input(10 * MIN, 0.3f));
+    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "start held at 10 min (no timeout)");
+    d = c.update(input(15 * MIN, 0.3f));
+    check(d.state == HeadState::START && d.transition == Transition::START_FAULT, "fault reported at 15 min");
+    d = c.update(input(15 * MIN + 2 * S, 0.3f));
+    check(d.state == HeadState::START && d.transition == Transition::NONE, "fault reported once; start kept");
   }
   {
     // Hailee's room 2026-11-19 01:44: switched on straight into a start, the
     // unit reported running for 20 s and stopped. That is not a run: the start
-    // setpoint stays until running holds for run_confirm_ms.
+    // level stays until running holds for run_confirm_ms.
     StartController c = make_confirming();
-    StartDecision d = c.update(idle_input(0, 0.6f));
+    StartDecision d = c.update(input(0, 0.3f));
     check(d.state == HeadState::START, "confirm: starts");
-    StartInput in = idle_input(10 * S, 0.6f);
+    StartInput in = input(10 * S, 0.3f);
     in.operating = true;
     d = c.update(in);
-    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "confirm: running, not yet a run; start setpoint kept");
+    check(d.state == HeadState::START && near(d.setpoint, 20.0f), "confirm: running, not yet a run; start level kept");
     in.now_ms = 30 * S;
     in.operating = false;
     d = c.update(in);
@@ -215,78 +232,32 @@ int main() {
     in.now_ms = 150 * S;
     d = c.update(in);
     check(d.state == HeadState::RUN && d.transition == Transition::RUNNING, "confirm: a run after 60 s of running");
-    check(near(d.setpoint, 19.5f), "confirm: run setpoint once confirmed");
-  }
-  {
-    // A start whose run is never confirmed still times out, but not while the
-    // unit reports running.
-    StartController c = make_confirming();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(4 * MIN + 30 * S, 0.6f);
-    in.operating = true;
-    StartDecision d = c.update(in);
-    in.now_ms = 5 * MIN + 10 * S;
-    d = c.update(in);
-    check(d.state == HeadState::START, "confirm: no timeout while the unit reports running");
-    in.now_ms = 5 * MIN + 30 * S;
-    d = c.update(in);
-    check(d.state == HeadState::RUN, "confirm: confirmed past the timeout");
-    StartController never = make_confirming();
-    never.update(idle_input(0, 0.6f));
-    in = idle_input(MIN, 0.6f);
-    in.operating = true;
-    never.update(in);
-    in.now_ms = MIN + 20 * S;
-    in.operating = false;
-    never.update(in);
-    d = never.update(idle_input(5 * MIN, 0.6f));
-    check(d.state == HeadState::IDLE && d.transition == Transition::START_TIMED_OUT, "confirm: blips only, times out");
-  }
-  {
-    // Shared heat ends a start whose run isn't confirmed yet.
-    StartController c = make_confirming();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(10 * S, 0.6f);
-    in.operating = true;
-    c.update(in);
-    in.now_ms = 30 * S;
-    in.shared_heat = true;
-    StartDecision d = c.update(in);
-    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_SHARED, "confirm: shared heat ends an unconfirmed run");
   }
   {
     // Riding the primary bedroom: Hailee's room 0.28 short of target wants a
     // start, but the primary is forecast to start in 2 min. Wait for it.
     StartController c = make();
-    StartInput in = idle_input(0, 0.6f);
+    StartInput in = input(0, 0.3f);
     in.shared_expected_s = 120.0f;
     StartDecision d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::DEFERRED, "defer: start held off for expected heat");
-    check(d.freeze_integral, "defer: integral frozen while waiting");
-    check(near(d.setpoint, 19.0f), "defer: idle setpoint");
+    check(near(d.setpoint, 19.0f), "defer: off level");
     in.now_ms = 60 * S;
     d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::NONE, "defer: logged once");
-    // The heat came: no start, and the deferral is over.
-    in.now_ms = 2 * MIN;
-    in.shared_heat = true;
-    in.shared_expected_s = NAN;
-    d = c.update(in);
-    check(d.state == HeadState::IDLE && !d.freeze_integral, "defer: ends when the heat arrives");
   }
   {
     // A deferral ends at the floor, at defer_max, and when the forecast goes.
     StartController c = make();
-    StartInput in = idle_input(0, 0.6f);
+    StartInput in = input(0, 0.3f);
     in.shared_expected_s = 60.0f;
     c.update(in);
     in.now_ms = 2 * MIN;
-    in.room = 19.75f;  // 0.53 short: past the 0.5 floor
-    StartDecision d = c.update(in);
-    check(d.state == HeadState::START, "defer: starts anyway past the floor");
+    in = at_room(in, 19.75f, 0.3f);  // 0.53 short: past the 0.5 floor
+    check(c.update(in).state == HeadState::START, "defer: starts anyway past the floor");
 
     StartController m = make();
-    in = idle_input(0, 0.6f);
+    in = input(0, 0.3f);
     in.shared_expected_s = 0.0f;  // forecast overdue, the primary never starts
     m.update(in);
     in.now_ms = 6 * MIN - S;
@@ -295,7 +266,7 @@ int main() {
     check(m.update(in).state == HeadState::START, "defer: starts anyway at defer_max");
 
     StartController g = make();
-    in = idle_input(0, 0.6f);
+    in = input(0, 0.3f);
     in.shared_expected_s = 200.0f;
     g.update(in);
     in.now_ms = 60 * S;
@@ -303,7 +274,7 @@ int main() {
     check(g.update(in).state == HeadState::START, "defer: starts once the forecast is dropped");
 
     StartController far = make();
-    in = idle_input(0, 0.6f);
+    in = input(0, 0.3f);
     in.shared_expected_s = 400.0f;  // beyond the 5 min window
     check(far.update(in).state == HeadState::START, "defer: a forecast beyond the window doesn't defer");
   }
@@ -311,9 +282,8 @@ int main() {
     // A parked head below target switches on to take expected heat, before
     // its own on_threshold; not when at target.
     StartController c = make();
-    StartInput in = idle_input(0, 0.0f);
+    StartInput in = at_room(input(0, 0.0f), 20.15f, 0.0f);  // 0.13 short: inside the band (on at 0.25)
     in.powered = false;
-    in.room = 20.15f;  // 0.13 short: inside the band (on at 0.25)
     StartDecision d = c.update(in);
     check(d.state == HeadState::PARKED && d.power == PowerRequest::NONE, "catch: parked inside the band");
     in.now_ms = 2 * MIN;
@@ -321,9 +291,8 @@ int main() {
     d = c.update(in);
     check(d.power == PowerRequest::TURN_ON && d.transition == Transition::CATCH, "catch: switched on for expected heat");
     StartController a = make();
-    in = idle_input(0, 0.0f);
+    in = at_room(input(0, 0.0f), 20.25f, 0.0f);  // 0.03 short: close enough
     in.powered = false;
-    in.room = 20.25f;  // 0.03 short: close enough
     a.update(in);
     in.now_ms = 2 * MIN;
     in.shared_heat = true;
@@ -331,14 +300,9 @@ int main() {
   }
   {
     // A run stops after min_run once the primary is forecast within 2 min.
-    StartController c = make();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(10 * S, 0.6f);
+    StartController c = running(0, 0.3f);
+    StartInput in = input(60 * S, 0.3f);
     in.operating = true;
-    in.room = 19.7f;
-    in.coast = 0.0f;
-    c.update(in);
-    in.now_ms = 60 * S;
     in.shared_expected_s = 60.0f;
     check(c.update(in).state == HeadState::RUN, "expected stop: not before the minimum run");
     in.now_ms = 2 * MIN + 10 * S;
@@ -347,19 +311,19 @@ int main() {
     in.now_ms = 2 * MIN + 20 * S;
     in.shared_expected_s = 100.0f;
     StartDecision d = c.update(in);
-    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_EXPECTED, "expected stop: stopped for expected heat");
+    check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_EXPECTED && near(d.setpoint, 19.0f),
+          "expected stop: stopped for expected heat, off level");
   }
   {
     // Park and unpark on the hysteresis band.
     StartController c = make();
-    StartInput in = idle_input(0, 0.0f);
-    in.room = 20.6f;  // +0.32: inside the band
+    StartInput in = at_room(input(0, 0.0f), 20.6f, -0.6f);  // +0.32: inside the band
     in.shared_heat = true;
     StartDecision d = c.update(in);
     check(d.power == PowerRequest::NONE && d.state == HeadState::IDLE,
           "shared heat inside the band: stays powered and takes the leak");
     in.now_ms = 2 * S;
-    in.room = 20.7f;  // +0.42: past off_threshold
+    in = at_room(in, 20.7f, -0.6f);  // +0.42: past off_threshold
     d = c.update(in);
     check(d.power == PowerRequest::TURN_OFF && d.transition == Transition::PARK, "park: shared heat past off_threshold");
     in.now_ms = 5 * S;
@@ -367,24 +331,23 @@ int main() {
     d = c.update(in);
     check(d.state == HeadState::PARKED && d.power == PowerRequest::NONE, "parked once the device is off");
     check(d.freeze_integral, "parked: integral frozen");
-    check(near(d.setpoint, 19.0f), "parked: the setpoint to switch on with is the idle level");
+    check(near(d.setpoint, 19.0f), "parked: the setpoint to switch on with is the off level");
     in.now_ms = 2 * MIN;
     in.shared_heat = false;
-    in.room = 20.1f;  // -0.18
-    in.demand = 0.6f;
+    in = at_room(in, 20.1f, 0.3f);  // -0.18, the PID asks for a start
     d = c.update(in);
-    check(d.power == PowerRequest::NONE, "parked: demand alone does not unpark inside the band");
-    in.room = 20.0f;  // -0.28: past on_threshold
+    check(d.power == PowerRequest::NONE, "parked: the PID alone does not unpark inside the band");
+    in = at_room(in, 20.0f, 0.3f);  // -0.28: past on_threshold
     d = c.update(in);
     check(d.power == PowerRequest::TURN_ON && d.transition == Transition::UNPARK, "unpark: room past on_threshold");
     in.now_ms = 2 * MIN + 5 * S;
     in.powered = true;
-    in.demand = 0.0f;
+    in = at_room(in, 20.0f, -0.6f);
     d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::UNPARKED, "unparked: idle again");
     // Shared heat past the band again: may not park within the minimum cycle.
     in.shared_heat = true;
-    in.room = 20.7f;
+    in = at_room(in, 20.7f, -0.6f);
     d = c.update(in);
     check(d.power == PowerRequest::NONE, "no park again within the minimum cycle");
     in.now_ms = 4 * MIN;
@@ -394,56 +357,62 @@ int main() {
   {
     // Without shared heat the controller leaves the cut to hysteresis (and its off_delay).
     StartController c = make();
-    StartInput in = idle_input(0, 0.0f);
-    in.room = 20.8f;
-    check(c.update(in).power == PowerRequest::NONE, "no park past the band without shared heat");
+    check(c.update(at_room(input(0, 0.0f), 20.8f, -0.8f)).power == PowerRequest::NONE,
+          "no park past the band without shared heat");
   }
   {
-    // A hysteresis cut counts as parked; the controller switches it on again at on_threshold.
-    StartController c = make();
-    c.update(idle_input(0, 0.0f));
-    StartInput in = idle_input(10 * S, 0.0f);
-    in.powered = false;
-    StartDecision d = c.update(in);
-    check(d.state == HeadState::PARKED && d.transition == Transition::PARKED, "hysteresis cut: parked");
-    in.now_ms = 2 * MIN;
-    in.room = 20.1f;
-    in.demand = 0.35f;
-    d = c.update(in);
-    check(d.power == PowerRequest::NONE, "hysteresis cut: stays off inside the band");
-    in.room = 19.9f;
-    d = c.update(in);
-    check(d.power == PowerRequest::TURN_ON, "hysteresis cut: switched on again at on_threshold");
-  }
-  {
-    // A hysteresis hold (past off_threshold, waiting out off_delay) stops a run.
-    StartController c = make();
-    c.update(idle_input(0, 0.6f));
-    StartInput in = idle_input(10 * S, 0.6f);
+    // A hysteresis hold (past off_threshold, waiting out off_delay) stops a run
+    // and abandons a start.
+    StartController c = running(0, 0.3f);
+    StartInput in = input(30 * S, 0.3f);
     in.operating = true;
-    in.coast = 0.0f;
-    StartDecision d = c.update(in);
-    check(d.state == HeadState::RUN, "hold: running");
-    in.now_ms = 30 * S;
     in.hold = true;
-    d = c.update(in);
+    StartDecision d = c.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_HOLD, "hold: run stopped before the minimum run");
-    check(near(d.setpoint, 19.0f), "hold: idle setpoint stops the compressor");
-    // A START is abandoned too.
+    check(near(d.setpoint, 19.0f), "hold: off level stops the compressor");
     StartController s = make();
-    s.update(idle_input(0, 0.6f));
-    in = idle_input(2 * S, 0.6f);
+    s.update(input(0, 0.3f));
+    in = input(2 * S, 0.3f);
     in.hold = true;
     d = s.update(in);
     check(d.state == HeadState::IDLE && d.transition == Transition::STOPPED_HOLD, "hold: start abandoned");
   }
   {
+    // The integral is frozen only while parked.
+    StartController c = running(0, 0.3f);
+    StartInput in = input(30 * S, 0.3f);
+    in.operating = true;
+    check(!c.update(in).freeze_integral, "run: integral accumulates");
+  }
+  {
+    // Cooling mirrors heating: the start level is the step at or below the room.
+    StartController c = make();
+    StartInput in = input(0, 0.0f);
+    in.heating = false;
+    in.device_view = 24.0f;
+    in.target = 23.5f;
+    in.room = 24.08f;
+    in.output = 24.08f - 0.3f;  // the PID asks for a setpoint 0.3 below the room
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::START && near(d.setpoint, 24.0f), "cooling: start level 24.0 for room 24.08");
+    in.now_ms = 10 * S;
+    in.operating = true;
+    in.output = 24.08f + 0.2f;
+    d = c.update(in);
+    check(d.level == Level::KEEP && near(d.setpoint, 24.5f), "cooling: running level one step above the reported");
+    in.now_ms = 3 * MIN;
+    in.output = 24.08f + 0.6f;
+    d = c.update(in);
+    check(d.transition == Transition::STOPPED_PID && near(d.setpoint, 25.0f), "cooling: PID stop, off level two steps above");
+  }
+  {
     // Cooling: parked once the room is off_threshold below the target.
     StartController c = make();
-    StartInput in = idle_input(0, 0.0f);
+    StartInput in = input(0, 0.0f);
     in.heating = false;
     in.device_view = 23.0f;
     in.room = 23.0f;
+    in.output = 23.6f;
     in.target = 23.5f;
     in.shared_heat = true;
     check(c.update(in).power == PowerRequest::TURN_OFF, "cooling: park past off_threshold below target");
@@ -456,31 +425,14 @@ int main() {
     check(c.update(in).power == PowerRequest::TURN_ON, "cooling: unpark on_threshold above target");
   }
   {
-    // Cooling mirrors heating.
+    // Without the unit's report, the room rounded to the step stands in; an
+    // unknown output asks for nothing.
     StartController c = make();
-    StartInput in = idle_input(0, 0.6f);
-    in.heating = false;
-    in.device_view = 24.0f;
-    in.room = 24.0f;
-    in.target = 23.5f;
-    StartDecision d = c.update(in);
-    check(d.state == HeadState::START && near(d.setpoint, 24.0f), "cooling: start at the unit's view");
-    in.now_ms = 10 * S;
-    in.operating = true;
-    d = c.update(in);
-    check(near(d.setpoint, 24.5f), "cooling: run one step above the start view");
-    in.now_ms = 3 * MIN;
-    in.room = 23.7f;  // 23.7 - 0.3 coast <= 23.5
-    d = c.update(in);
-    check(d.transition == Transition::STOPPED_EARLY && near(d.setpoint, 25.0f), "cooling: early stop, idle two steps above");
-  }
-  {
-    // Without the unit's view, the room rounded to the step stands in.
-    StartController c = make();
-    StartInput in = idle_input(0, 0.0f);
+    StartInput in = at_room(input(0, 0.0f), 20.3f, -0.6f);
     in.device_view = NAN;
-    in.room = 20.3f;
-    check(near(c.update(in).setpoint, 19.5f), "no device view: room rounded to the step");
+    check(near(c.update(in).setpoint, 19.5f), "no reported temperature: room rounded to the step");
+    in.output = NAN;
+    check(c.update(in).level == Level::OFF, "no PID output: off level");
   }
 
   std::printf("%s\n", failures == 0 ? "all passed" : "FAILURES");
