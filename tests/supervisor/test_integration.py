@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 from typing import Any
 
 from freezegun.api import FrozenDateTimeFactory
@@ -335,3 +336,19 @@ async def test_head_without_forecast_action(hass: HomeAssistant, house: FakeHous
     # Shared heat still goes out; the forecast is skipped.
     assert ("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS}) in house.calls("hailee")
     assert house.calls("hailee", "shared_heat_expected") == []
+
+
+async def test_diagnostics(hass: HomeAssistant, house: FakeHouse) -> None:
+    from custom_components.climate_adaptivepid_supervisor.diagnostics import async_get_config_entry_diagnostics
+
+    entry = await setup_supervisor(hass, house)
+    house.set_operating("primary", True)
+    await hass.async_block_till_done()
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    json.dumps(diagnostics)  # serialisable as downloaded
+    hailee = diagnostics["heads"][house.heads["hailee"].climate]
+    assert hailee["hinted"] is True and hailee["plan"]["shared_heat"] is True
+    assert hailee["sent_shared_heat"] is True
+    primary = diagnostics["heads"][house.heads["primary"].climate]
+    assert primary["stats"]["starts"] == 1 and primary["predictor"]["operating"] is True
+    assert diagnostics["outdoor_unit_running"] is True and diagnostics["mode_conflict"] is None

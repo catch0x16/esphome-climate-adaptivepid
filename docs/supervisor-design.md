@@ -70,6 +70,8 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 
 **Repair issues** (Settings → Repairs) are also raised at setup for a head without an `Operating` sensor (it always counts as not running) and for a hinted room without an ESPHome device (no hints can be sent). They are removed when the integration unloads and raised again on the next start if they still apply.
 
+**Diagnostics:** the integration's *Download diagnostics* gives, per head, its resolved entities, plan and last hints sent, the learned starts per mode and recent room samples, the `Operating` hold, and the start statistics including the pending forecast.
+
 **Saved state:** each head's learned starts (the last 8 per mode), its start counts and its last 20 forecast errors are kept in `.storage/climate_adaptivepid_supervisor.<entry_id>`. It is saved a minute after each start and when Home Assistant stops, read before the entities are created (so the counts never drop to 0, which statistics would take as a reset), and deleted with the entry. Old starts leave only as new ones replace them, never with time, so last winter's heating starts are there for the first forecast in autumn. A head removed from the configuration is dropped at the next save; an unreadable file is ignored and learning starts again.
 
 **Entities:**
@@ -92,6 +94,7 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - **The start statistics:** stacking both ways, forecast scoring from 3 min out, stale and missing forecasts, and the counts restored across a restart.
 - **The mode conflict:** heat against cool or dry only, reported after 10 minutes and not for a brief switch-over, cleared at once.
 - **Repair issues** for a missing `Operating` sensor, removed at unload.
+- **Diagnostics:** serialisable, with the plan, the hints sent and the statistics.
 - **The disable switch.**
 - **A head offline.**
 - **The config flow.**
