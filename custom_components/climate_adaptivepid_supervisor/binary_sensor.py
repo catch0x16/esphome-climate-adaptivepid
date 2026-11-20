@@ -15,7 +15,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: SupervisorConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     coordinator = entry.runtime_data
-    entities: list[BinarySensorEntity] = [OutdoorUnitRunning(coordinator)]
+    entities: list[BinarySensorEntity] = [OutdoorUnitRunning(coordinator), ModeConflictSensor(coordinator)]
     entities += [SharedHeat(coordinator, climate) for climate in coordinator.hinted]
     async_add_entities(entities)
 
@@ -33,6 +33,29 @@ class OutdoorUnitRunning(SupervisorEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return self.coordinator.outdoor_running
+
+
+class ModeConflictSensor(SupervisorEntity, BinarySensorEntity):
+    """Heads heating while others cool, for 10 minutes; also raised as a repair issue."""
+
+    _attr_translation_key = "mode_conflict"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "mode_conflict")
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.mode_conflict is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, list[str]]:
+        conflict = self.coordinator.mode_conflict
+        return {
+            "heating": list(conflict.heating) if conflict else [],
+            "cooling": list(conflict.cooling) if conflict else [],
+        }
 
 
 class SharedHeat(SupervisorEntity, BinarySensorEntity):

@@ -309,6 +309,42 @@ class StartStats:
         stats.forecast_at = None
 
 
+# Heads in opposite modes this long are a mode conflict (a mode automation
+# switching the heads one by one disagrees only briefly).
+CONFLICT_SUSTAIN_S = 600.0
+
+
+@dataclass(frozen=True)
+class ModeConflict:
+    """Heads heating while others cool or dry, on one outdoor unit."""
+
+    heating: tuple[str, ...]
+    cooling: tuple[str, ...]
+
+
+def mode_conflict(heads: dict[str, Head]) -> ModeConflict | None:
+    """The heads in opposite modes, or None. Off, fan and auto conflict with nothing."""
+    heating = tuple(sorted(head.name for head in heads.values() if head.mode == "heat"))
+    cooling = tuple(sorted(head.name for head in heads.values() if head.mode in ("cool", "dry")))
+    return ModeConflict(heating, cooling) if heating and cooling else None
+
+
+@dataclass
+class Sustained:
+    """True once a condition has held for `seconds`; false as soon as it ends."""
+
+    seconds: float
+    since: float | None = None
+
+    def update(self, now: float, active: bool) -> bool:
+        if not active:
+            self.since = None
+            return False
+        if self.since is None:
+            self.since = now
+        return now - self.since >= self.seconds
+
+
 def outdoor_unit_running(heads: dict[str, Head]) -> bool:
     """Whether any head in the group is operating."""
     return any(head.operating for head in heads.values())

@@ -6,7 +6,11 @@ from custom_components.climate_adaptivepid_supervisor.logic import (
     UNKNOWN_HOLD_S,
     Head,
     OperatingHold,
+    CONFLICT_SUSTAIN_S,
     HeadStats,
+    ModeConflict,
+    Sustained,
+    mode_conflict,
     StartPredictor,
     StartStats,
     outdoor_unit_running,
@@ -273,3 +277,24 @@ def test_stats_saved_and_restored():
     restored = HeadStats()
     restored.load(stats.head("primary").to_dict())
     assert (restored.starts, restored.stacked, list(restored.errors)) == (1, 1, [30.0])
+
+
+def test_mode_conflict_is_heat_against_cool_or_dry():
+    h = heads()
+    assert mode_conflict(h) is None
+    h["main"] = Head(name="main", mode="cool")
+    assert mode_conflict(h) == ModeConflict(heating=("hailee", "primary"), cooling=("main",))
+    h["main"] = Head(name="main", mode="dry")
+    assert mode_conflict(h) is not None
+    for harmless in ("off", "fan_only", "heat_cool", "unavailable", None):
+        h["main"] = Head(name="main", mode=harmless)
+        assert mode_conflict(h) is None
+
+
+def test_sustained_only_after_its_time_and_ends_at_once():
+    watch = Sustained(CONFLICT_SUSTAIN_S)
+    assert watch.update(0, True) is False
+    assert watch.update(CONFLICT_SUSTAIN_S - 1, True) is False
+    assert watch.update(CONFLICT_SUSTAIN_S, True) is True
+    assert watch.update(CONFLICT_SUSTAIN_S + 1, False) is False
+    assert watch.update(CONFLICT_SUSTAIN_S + 2, True) is False  # starts over

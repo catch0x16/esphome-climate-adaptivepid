@@ -45,6 +45,9 @@
       },
       "shared_heat": {
         "name": "{room} shared heat"
+      },
+      "mode_conflict": {
+        "name": "Mode conflict"
       }
     },
     "sensor": {
@@ -69,6 +72,20 @@
       "start_forecast_hit_rate": {
         "name": "{room} start forecast hit rate"
       }
+    }
+  },
+  "issues": {
+    "mode_conflict": {
+      "title": "{name}: heads in opposite modes",
+      "description": "On {name}, {heating} heating while {cooling} cooling, for over 10 minutes. The outdoor unit runs in one mode at a time, so the heads in the other mode get no heating or cooling. Set every head to the same mode. This clears by itself once they agree."
+    },
+    "no_operating_sensor": {
+      "title": "{name}: no Operating sensor for {climate}",
+      "description": "The supervisor could not find the Operating binary sensor on {climate}'s device, so that head always counts as not running. Check that the head runs climate_adaptivepid and that its Operating sensor is enabled, then reload the integration."
+    },
+    "no_esphome_device": {
+      "title": "{name}: no ESPHome device for {climate}",
+      "description": "{climate} receives hints, but the supervisor could not find its ESPHome device, so no hints are sent to it. Check that the climate belongs to an ESPHome device, then reload the integration."
     }
   }
 }

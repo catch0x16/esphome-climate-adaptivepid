@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.util import dt as dt_util
 
 from custom_components.climate_adaptivepid_supervisor.const import (
@@ -202,6 +203,58 @@ async def test_unreadable_save_starts_fresh(
     hass_storage[f"{DOMAIN}.junk"] = {"version": STORAGE_VERSION, "key": f"{DOMAIN}.junk", "data": ["junk"]}
     await setup_supervisor(hass, house, entry_id="junk")
     assert hass.states.get("sensor.outdoor_unit_primarybedroomhvac_hvac_starts").state == "0"
+
+
+async def renew(hass: HomeAssistant, freezer: FrozenDateTimeFactory, minutes: int) -> None:
+    for _ in range(minutes):
+        freezer.tick(timedelta(seconds=60))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+
+async def test_mode_conflict(hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory) -> None:
+    entry = await setup_supervisor(hass, house)
+    issues = ir.async_get(hass)
+    conflict_id = f"{entry.entry_id}_mode_conflict"
+    sensor = "binary_sensor.outdoor_unit_mode_conflict"
+    assert hass.states.get(sensor).state == "off"
+
+    # The mode automation switching heads one by one: a brief conflict only.
+    house.set_climate("main", mode="cool")
+    await renew(hass, freezer, 3)
+    house.set_climate("primary", mode="cool")
+    house.set_climate("hailee", mode="cool")
+    await renew(hass, freezer, 15)
+    assert issues.async_get_issue(DOMAIN, conflict_id) is None
+
+    # A head left behind: reported after 10 minutes.
+    house.set_climate("hailee", mode="heat")
+    await renew(hass, freezer, 9)
+    assert hass.states.get(sensor).state == "off"
+    await renew(hass, freezer, 2)
+    assert hass.states.get(sensor).state == "on"
+    assert hass.states.get(sensor).attributes["heating"] == ["haileesbedroomhvac hvac"]
+    issue = issues.async_get_issue(DOMAIN, conflict_id)
+    assert issue is not None and issue.translation_key == "mode_conflict"
+
+    # Cleared at once when the modes agree.
+    house.set_climate("hailee", mode="cool")
+    await hass.async_block_till_done()
+    assert hass.states.get(sensor).state == "off"
+    assert issues.async_get_issue(DOMAIN, conflict_id) is None
+
+
+async def test_setup_problems_are_repair_issues(hass: HomeAssistant, house: FakeHouse) -> None:
+    er.async_get(hass).async_remove(house.heads["main"].operating)
+    entry = await setup_supervisor(hass, house)
+    issues = ir.async_get(hass)
+    main = house.heads["main"].climate
+    issue = issues.async_get_issue(DOMAIN, f"{entry.entry_id}_no_operating_{main}")
+    assert issue is not None and issue.translation_placeholders["climate"] == main
+    assert issues.async_get_issue(DOMAIN, f"{entry.entry_id}_no_operating_{house.heads['primary'].climate}") is None
+    # Unloading takes them away; a reload raises them again if they still apply.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert issues.async_get_issue(DOMAIN, f"{entry.entry_id}_no_operating_{main}") is None
 
 
 async def test_head_offline_does_not_stop_others(hass: HomeAssistant, house: FakeHouse) -> None:

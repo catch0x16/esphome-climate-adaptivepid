@@ -66,11 +66,16 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 
 **Head side.** The device YAML defines the action, calling the climate's `set_shared_heat_hint(active, valid_for_s)`. Without the hint, each head's local detector decides (see [start-control-design.md](start-control-design.md#independence)).
 
+**Mode conflict.** The outdoor unit runs in one mode at a time, so a head heating while another cools or dries gets nothing. When that lasts 10 minutes, the supervisor turns on `binary_sensor.<name>_mode_conflict` (with the heating and cooling heads as attributes), raises a repair issue and writes a logbook entry; both clear as soon as the modes agree. Off, fan only and auto conflict with nothing. The 10 minutes let a mode automation switch the heads one by one. It only reports: switching modes is Phase 5d.
+
+**Repair issues** (Settings → Repairs) are also raised at setup for a head without an `Operating` sensor (it always counts as not running) and for a hinted room without an ESPHome device (no hints can be sent). They are removed when the integration unloads and raised again on the next start if they still apply.
+
 **Saved state:** each head's learned starts (the last 8 per mode), its start counts and its last 20 forecast errors are kept in `.storage/climate_adaptivepid_supervisor.<entry_id>`. It is saved a minute after each start and when Home Assistant stops, read before the entities are created (so the counts never drop to 0, which statistics would take as a reset), and deleted with the entry. Old starts leave only as new ones replace them, never with time, so last winter's heating starts are there for the first forecast in autumn. A head removed from the configuration is dropped at the next save; an unreadable file is ignored and learning starts again.
 
 **Entities:**
 - `switch.<name>_supervisor_enabled` (restored across restarts): while off, nothing is sent.
 - `binary_sensor.<name>_outdoor_unit_running`: diagnostic, any head operating.
+- `binary_sensor.<name>_mode_conflict`: diagnostic, heads in opposite modes for 10 minutes.
 - Per hinted room:
   - `binary_sensor.<name>_<room>_shared_heat`: other heads only.
   - `sensor.<name>_<room>_supervisor_action`: `none`, `shared_heat`, `shared_heat_expected` or `disabled`, with the reason and `expected_in_s` as attributes.
@@ -85,6 +90,8 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - **The hint lifecycle:** sent when another head starts, renewed, cleared when it stops, never for the room's own run.
 - **The forecast:** learned from the other heads' starts, sent within 5 min, cleared when the head starts; skipped for a head without the action.
 - **The start statistics:** stacking both ways, forecast scoring from 3 min out, stale and missing forecasts, and the counts restored across a restart.
+- **The mode conflict:** heat against cool or dry only, reported after 10 minutes and not for a brief switch-over, cleared at once.
+- **Repair issues** for a missing `Operating` sensor, removed at unload.
 - **The disable switch.**
 - **A head offline.**
 - **The config flow.**

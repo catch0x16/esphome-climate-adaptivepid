@@ -12,7 +12,7 @@ from homeassistant.components.logbook import async_log_entry
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -29,7 +29,19 @@ from .const import (
     SHARED_HEAT_VALID_SECONDS,
     STORAGE_VERSION,
 )
-from .logic import Head, OperatingHold, RoomPlan, StartPredictor, StartStats, outdoor_unit_running, plan
+from .logic import (
+    CONFLICT_SUSTAIN_S,
+    Head,
+    ModeConflict,
+    OperatingHold,
+    RoomPlan,
+    StartPredictor,
+    StartStats,
+    Sustained,
+    mode_conflict,
+    outdoor_unit_running,
+    plan,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -101,6 +113,10 @@ class SupervisorCoordinator:
         self.predictors: dict[str, StartPredictor] = {}
         self.holds: dict[str, OperatingHold] = {}
         self.stats = StartStats()
+        # A sustained mode conflict, as reported (None: none).
+        self.mode_conflict: ModeConflict | None = None
+        self._conflict = Sustained(CONFLICT_SUSTAIN_S)
+        self._issues: set[str] = set()
         self._store = make_store(hass, entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
@@ -122,6 +138,38 @@ class SupervisorCoordinator:
             self.predictors.setdefault(climate, StartPredictor()).load(saved.get("predictor"))
             self.stats.head(climate).load(saved.get("stats"))
 
+    def _issue_id(self, key: str) -> str:
+        return f"{self.entry.entry_id}_{key}"
+
+    def _create_issue(self, key: str, translation_key: str, **placeholders: str) -> None:
+        issue_id = self._issue_id(key)
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=translation_key,
+            translation_placeholders={"name": self.entry.title, **placeholders},
+        )
+        self._issues.add(issue_id)
+
+    def _report_conflict(self, conflict: ModeConflict | None) -> None:
+        """Raises or clears the mode conflict issue when it changes."""
+        if conflict == self.mode_conflict:
+            return
+        self.mode_conflict = conflict
+        if conflict is None:
+            _LOGGER.info("Mode conflict cleared")
+            ir.async_delete_issue(self.hass, DOMAIN, self._issue_id("mode_conflict"))
+            self._issues.discard(self._issue_id("mode_conflict"))
+            return
+        heating, cooling = ", ".join(conflict.heating), ", ".join(conflict.cooling)
+        message = f"mode conflict: {heating} heating, {cooling} cooling"
+        _LOGGER.warning("%s: %s", self.entry.title, message)
+        async_log_entry(self.hass, "Supervisor", message, domain=DOMAIN)
+        self._create_issue("mode_conflict", "mode_conflict", heating=heating, cooling=cooling)
+
     def _data(self) -> dict[str, Any]:
         return {
             "heads": {
@@ -139,8 +187,10 @@ class SupervisorCoordinator:
             self.entities[climate] = head
             if head.operating is None:
                 _LOGGER.warning("%s: no '%s' sensor found; it counts as not running", climate, OPERATING_NAME)
+                self._create_issue(f"no_operating_{climate}", "no_operating_sensor", climate=climate)
             if climate in self.hinted and head.node is None:
                 _LOGGER.warning("%s: no ESPHome device found; hints cannot be sent to it", climate)
+                self._create_issue(f"no_esphome_{climate}", "no_esphome_device", climate=climate)
         tracked = [e for h in self.entities.values() for e in (h.climate, h.operating) if e]
         self._unsubs.append(async_track_state_change_event(self.hass, tracked, self._on_state_change))
         self._unsubs.append(
@@ -152,6 +202,10 @@ class SupervisorCoordinator:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
+        # Raised again on the next start if they still apply.
+        for issue_id in list(self._issues):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+        self._issues.clear()
         await self._store.async_save(self._data())
 
     @callback
@@ -213,6 +267,12 @@ class SupervisorCoordinator:
             expected[climate] = predictor.expected_in_s(now, heads[climate])
             self.stats.forecast(now, climate, expected[climate])
         self.outdoor_running = outdoor_unit_running(heads)
+        conflict = mode_conflict(heads)
+        sustained = self._conflict.update(now, conflict is not None)
+        if sustained:
+            self._report_conflict(conflict)
+        elif conflict is None:
+            self._report_conflict(None)
         self.plans = plan(heads, self.hinted, expected)
         if self.enabled:
             for climate, room_plan in self.plans.items():
