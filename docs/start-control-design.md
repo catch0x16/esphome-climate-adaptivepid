@@ -158,6 +158,7 @@ Validation rejects:
 **Diagnostics** (created only with start control):
 - **`Control state`:** 0 IDLE, 1 START, 2 RUN, 3 PARKED.
 - **`Shared heat`.**
+- **`PID Set Point`** shows the PID's output (O, continuous); `Set Point` shows the level sent to the unit.
 
 Every transition is logged at INFO with room, target, the PID's output, the level, the setpoint sent, the reported temperature, and the shared-heat source.
 

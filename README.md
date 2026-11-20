@@ -82,7 +82,8 @@ climate's and can only be narrowed.
 Diagnostic entities are created automatically: `Internal power on` (what the
 workflow last commanded), `Device power on`, `Operating`, `Current temperature`
 (the device's own reading), `Set Point` (the device's setpoint) and
-`PID Set Point`, plus `PID Kp` and `PID Ki` when the PID is used, and with
+`PID Set Point` (the PID's correction; with start control its continuous output,
+while `Set Point` shows the level sent), plus `PID Kp` and `PID Ki` when the PID is used, and with
 adaptive tuning the learned room model: `Heating rate`, `Cooling rate`,
 `Heat loss`, `Dead time heating` and `Dead time cooling`. Each can be renamed
 or reconfigured under its key (`internal_power`, `device_power`, `operating`,

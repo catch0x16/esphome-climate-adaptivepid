@@ -748,7 +748,11 @@ void ClimateAdaptivePID::publish_diagnostics_() {
   publish_binary(this->operating_sensor_, this->device_.device_operating());
   publish_value(this->device_current_temperature_sensor_, this->inner_->current_temperature);
   publish_value(this->device_set_point_sensor_, this->inner_->target_temperature);
-  publish_value(this->pid_set_point_sensor_, this->device_.corrected_target());
+  // Under start control the device setpoint is one of three levels; the PID's
+  // own output is what it asks for, continuous.
+  const bool start_control = this->pid_step_ != nullptr && this->pid_step_->isStartControl();
+  publish_value(this->pid_set_point_sensor_,
+                start_control ? this->pid_step_->pidOutput() : this->device_.corrected_target());
   if (this->pid_step_ != nullptr) {
     publish_value(this->pid_kp_sensor_, this->pid_step_->kp());
     publish_value(this->pid_ki_sensor_, this->pid_step_->ki());

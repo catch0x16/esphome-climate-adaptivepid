@@ -213,6 +213,7 @@ namespace workflow {
             // current once the head is switched back on; its integral is frozen
             // only while parked.
             const float output = this->adaptivePID->update(currentTemperature, now, true);
+            this->startOutput = output;
 
             // Shared heat: only while the head is powered, idle and past its own coast.
             const bool eligible = powered && !operating && this->startCtl.state() == HeadState::IDLE &&
