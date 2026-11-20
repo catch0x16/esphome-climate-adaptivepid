@@ -46,6 +46,10 @@ For each head, the integration finds its `Operating` binary sensor and its ESPHo
 
 **Forecast.** The primary bedroom isn't under start control and starts at a steady deficit below its target (0.22–0.37 °C, median 0.32, over 62 starts). For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. The history is in memory, so after a Home Assistant restart forecasts resume after 4 starts.
 
+Only starts reached by drifting are learned:
+- **A start within 10 minutes of a target or mode change** was commanded (a schedule raising the target starts the head at once, a full degree below it) and is not learned.
+- **An `Operating` sensor that goes unavailable** (an ESPHome reconnect) leaves a gap, not a stop: the first on or off after it is not learned as a start, and a gap that ends off counts as a stop. A head in a gap gets no forecast.
+
 Why it helps: each primary run warms Hailee's room by about 0.7–0.9 °C while her head is powered, more than the 0.3 she starts a run at, and her runs warm the primary's room in turn, pushing its start back by about 9 minutes (2026-11-17..19). Hailee's starts came 0.5–3.3 min before a primary start 8 times out of 19 on 2026-11-18/19, so the two runs stacked.
 
 Park and unpark requests were removed in 0.2.0: the head parks on its own hysteresis band (see [start-control-design.md](start-control-design.md#transitions)), so the supervisor no longer needs a margin of its own. A `park_margin` saved by 0.1 is ignored.
@@ -57,6 +61,7 @@ A room's own run never counts as shared heat for that room. Rooms in modes other
 - **Expiry:** the hint is valid for 120 s, so a stopped supervisor leaves the heads alone within 2 minutes.
 - **Calls:** `esphome.<node>_shared_heat`, and `esphome.<node>_shared_heat_expected` (`expected_in_s`, −1 clears it) when the head defines it. A new or cleared forecast goes out at once; the countdown is renewed every minute.
 - **Failures:** a failed call (head offline) is logged and skipped; the other heads are unaffected.
+- **A head's `Operating` unavailable:** its last known state still counts for 5 minutes, so a reconnect of a running head doesn't clear the other rooms' shared heat. After that it counts as not running.
 - **Logbook:** every change of hints is written to the logbook against the room's climate.
 
 **Head side.** The device YAML defines the action, calling the climate's `set_shared_heat_hint(active, valid_for_s)`. Without the hint, each head's local detector decides (see [start-control-design.md](start-control-design.md#independence)).

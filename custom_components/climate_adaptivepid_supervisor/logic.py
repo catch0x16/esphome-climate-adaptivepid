@@ -35,6 +35,7 @@ class Head:
     """What the supervisor knows about one head."""
 
     name: str
+    # None: not known (the head's Operating sensor is unavailable).
     operating: bool | None = None
     # "heat", "cool" or anything else (no hints outside heat and cool).
     mode: str | None = None
@@ -68,6 +69,32 @@ MIN_FALL_PER_S = 0.0001
 OVERDUE_MARGIN = 0.15
 # Forecasts further out than this are not sent.
 EXPECT_WINDOW_S = 300
+# A start this soon after a target or mode change was commanded, not reached
+# by drifting, so its deficit is not learned.
+AFTER_CHANGE_S = 600.0
+# A head whose Operating state goes unknown (an ESPHome reconnect) keeps its
+# last known state for this long before it counts as not running.
+UNKNOWN_HOLD_S = 300.0
+
+
+@dataclass
+class OperatingHold:
+    """Bridges short gaps in one head's Operating state for the plan."""
+
+    known: bool | None = None
+    unknown_since: float | None = None
+
+    def update(self, now: float, operating: bool | None) -> bool | None:
+        """The state the plan uses: the reported one, or the last known within the hold."""
+        if operating is not None:
+            self.known = operating
+            self.unknown_since = None
+            return operating
+        if self.unknown_since is None:
+            self.unknown_since = now
+        if now - self.unknown_since > UNKNOWN_HOLD_S:
+            return None
+        return self.known
 
 
 @dataclass
@@ -76,19 +103,39 @@ class StartPredictor:
 
     deficits: deque[float] = field(default_factory=lambda: deque(maxlen=START_HISTORY))
     samples: deque[tuple[float, float]] = field(default_factory=deque)
+    # None: not known yet, or after a gap (an edge across a gap is not a start
+    # or a stop: the head may have started or stopped at any time in it).
     operating: bool | None = None
     last_stop: float | None = None
+    target: float | None = None
+    mode: str | None = None
+    last_change: float | None = None
 
     def observe(self, now: float, head: Head) -> None:
         """Called on every state change and renewal with the head's state."""
-        heating = head.mode == "heat"
-        if head.operating and self.operating is False and head.room is not None and head.target is not None:
-            sign = 1.0 if heating else -1.0
+        if head.target is not None:
+            if self.target is not None and head.target != self.target:
+                self.last_change = now
+            self.target = head.target
+        if head.mode is not None:
+            if self.mode is not None and head.mode != self.mode:
+                self.last_change = now
+            self.mode = head.mode
+        commanded = self.last_change is not None and now - self.last_change < AFTER_CHANGE_S
+        if (
+            head.operating
+            and self.operating is False
+            and not commanded
+            and head.mode in ("heat", "cool")
+            and head.room is not None
+            and head.target is not None
+        ):
+            sign = 1.0 if head.mode == "heat" else -1.0
             self.deficits.append(sign * (head.target - head.room))
-        if not head.operating and self.operating:
+        if head.operating is False and self.operating is not False:
+            # A stop, or a gap that ended stopped (it may have just stopped).
             self.last_stop = now
-        if head.operating is not None:
-            self.operating = head.operating
+        self.operating = head.operating
         if head.room is not None:
             if not self.samples or now - self.samples[-1][0] >= 1.0:
                 self.samples.append((now, head.room))
@@ -97,7 +144,7 @@ class StartPredictor:
 
     def expected_in_s(self, now: float, head: Head) -> float | None:
         """Seconds until the head is predicted to start, or None."""
-        if head.operating or head.mode not in ("heat", "cool") or head.room is None or head.target is None:
+        if head.operating is not False or head.mode not in ("heat", "cool") or head.room is None or head.target is None:
             return None
         if len(self.deficits) < MIN_STARTS:
             return None

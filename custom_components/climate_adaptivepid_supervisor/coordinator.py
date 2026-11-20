@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 import logging
 
 from homeassistant.components.logbook import async_log_entry
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
@@ -25,7 +25,7 @@ from .const import (
     RENEW_SECONDS,
     SHARED_HEAT_VALID_SECONDS,
 )
-from .logic import Head, RoomPlan, StartPredictor, outdoor_unit_running, plan
+from .logic import Head, OperatingHold, RoomPlan, StartPredictor, outdoor_unit_running, plan
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +90,7 @@ class SupervisorCoordinator:
         self._sent_expected: dict[str, object] = {}
         self._no_expected_action: set[str] = set()
         self.predictors: dict[str, StartPredictor] = {}
+        self.holds: dict[str, OperatingHold] = {}
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
 
@@ -132,15 +133,23 @@ class SupervisorCoordinator:
         heads: dict[str, Head] = {}
         for climate, entities in self.entities.items():
             state = self.hass.states.get(climate)
-            operating_state = self.hass.states.get(entities.operating) if entities.operating else None
             heads[climate] = Head(
                 name=state.name if state is not None else climate,
-                operating=operating_state is not None and operating_state.state == STATE_ON,
+                operating=self._operating(entities),
                 mode=state.state if state is not None else None,
                 room=_float_attr(state, "current_temperature"),
                 target=_float_attr(state, "temperature"),
             )
         return heads
+
+    def _operating(self, entities: HeadEntities) -> bool | None:
+        """On or off; None while the sensor is unavailable. A head without one counts as off."""
+        if entities.operating is None:
+            return False
+        state = self.hass.states.get(entities.operating)
+        if state is None or state.state not in (STATE_ON, STATE_OFF):
+            return None
+        return state.state == STATE_ON
 
     async def _on_state_change(self, event: Event[EventStateChangedData]) -> None:
         await self.async_update(renew=False)
@@ -149,13 +158,17 @@ class SupervisorCoordinator:
         await self.async_update(renew=True)
 
     async def async_update(self, renew: bool) -> None:
-        heads = self.snapshot()
+        reported = self.snapshot()
         now = dt_util.utcnow().timestamp()
         expected: dict[str, float | None] = {}
-        for climate, head in heads.items():
+        heads: dict[str, Head] = {}
+        for climate, head in reported.items():
+            # The predictor sees gaps as gaps; the plan bridges short ones.
             predictor = self.predictors.setdefault(climate, StartPredictor())
             predictor.observe(now, head)
-            expected[climate] = predictor.expected_in_s(now, head)
+            hold = self.holds.setdefault(climate, OperatingHold())
+            heads[climate] = replace(head, operating=hold.update(now, head.operating))
+            expected[climate] = predictor.expected_in_s(now, heads[climate])
         self.outdoor_running = outdoor_unit_running(heads)
         self.plans = plan(heads, self.hinted, expected)
         if self.enabled:

@@ -1,7 +1,11 @@
 """The supervisor's decisions, without Home Assistant."""
 
+import pytest
+
 from custom_components.climate_adaptivepid_supervisor.logic import (
+    UNKNOWN_HOLD_S,
     Head,
+    OperatingHold,
     StartPredictor,
     outdoor_unit_running,
     plan,
@@ -123,3 +127,63 @@ def test_no_forecast_right_after_a_stop():
     predictor, now = learned_predictor()
     predictor.observe(now + 60, primary(19.30))
     assert predictor.expected_in_s(now + 60, primary(19.30)) is None
+
+
+def test_a_gap_is_not_a_start():
+    """An Operating sensor that drops out and comes back on is not a start."""
+    predictor, now = learned_predictor()
+    learned = list(predictor.deficits)
+    predictor.observe(now + 60, Head(name="primary", operating=None, mode="heat", room=19.60, target=19.72))
+    predictor.observe(now + 120, primary(19.65, operating=True))  # back, mid-run
+    assert list(predictor.deficits) == learned
+    # The next real start is learned again.
+    predictor.observe(now + 700, primary(19.80))
+    predictor.observe(now + 1300, primary(19.40, operating=True))
+    assert len(predictor.deficits) == len(learned) + 1
+
+
+def test_a_gap_that_ends_stopped_counts_as_a_stop():
+    predictor, now = learned_predictor()
+    predictor.observe(now + 600, primary(19.70, operating=True))
+    predictor.observe(now + 660, Head(name="primary", operating=None, mode="heat", room=19.75, target=19.72))
+    predictor.observe(now + 720, primary(19.75))
+    assert predictor.last_stop == now + 720
+
+
+def test_no_forecast_for_a_head_in_a_gap():
+    predictor, now = learned_predictor()
+    for minute in range(11):
+        predictor.observe(now + 60 * minute, primary(19.60 - 0.02 * minute))
+    unknown = Head(name="primary", operating=None, mode="heat", room=19.40, target=19.72)
+    assert predictor.expected_in_s(now + 600, unknown) is None
+
+
+def test_a_start_after_a_target_change_is_not_learned():
+    predictor, now = learned_predictor()
+    learned = list(predictor.deficits)
+    raised = 19.72 + 0.56  # the sunrise automation: +1 F
+    predictor.observe(now + 600, Head(name="primary", operating=False, mode="heat", room=19.70, target=raised))
+    predictor.observe(now + 660, Head(name="primary", operating=True, mode="heat", room=19.70, target=raised))
+    assert list(predictor.deficits) == learned
+    # Long after the change, starts are learned again.
+    predictor.observe(now + 2000, Head(name="primary", operating=False, mode="heat", room=20.40, target=raised))
+    predictor.observe(now + 3000, Head(name="primary", operating=True, mode="heat", room=19.96, target=raised))
+    assert predictor.deficits[-1] == pytest.approx(0.32)
+
+
+def test_a_start_after_a_mode_change_is_not_learned():
+    predictor, now = learned_predictor()
+    learned = list(predictor.deficits)
+    predictor.observe(now + 600, Head(name="primary", operating=False, mode="cool", room=19.70, target=19.72))
+    predictor.observe(now + 660, Head(name="primary", operating=True, mode="cool", room=20.20, target=19.72))
+    assert list(predictor.deficits) == learned
+
+
+def test_operating_hold_bridges_short_gaps_only():
+    hold = OperatingHold()
+    assert hold.update(0, True) is True
+    assert hold.update(10, None) is True  # reconnecting: still running
+    assert hold.update(10 + UNKNOWN_HOLD_S, None) is True
+    assert hold.update(11 + UNKNOWN_HOLD_S, None) is None  # gone too long: not known
+    assert hold.update(400, False) is False
+    assert OperatingHold().update(0, None) is None  # never known

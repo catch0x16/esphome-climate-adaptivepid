@@ -101,6 +101,34 @@ async def test_disable_switch_stops_commands(hass: HomeAssistant, house: FakeHou
     assert ("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS}) in house.calls("hailee")
 
 
+async def test_operating_dropout_keeps_shared_heat(
+    hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory
+) -> None:
+    """An ESPHome reconnect of a running head does not clear the other rooms' shared heat."""
+    entry = await setup_supervisor(hass, house)
+    house.set_operating("primary", True)
+    await hass.async_block_till_done()
+    predictor = entry.runtime_data.predictors[house.heads["primary"].climate]
+    learned = list(predictor.deficits)  # the real start
+    house.heads["hailee"].calls.clear()
+    hass.states.async_set(house.heads["primary"].operating, "unavailable")
+    await hass.async_block_till_done()
+    assert house.calls("hailee") == []  # unchanged: still shared heat
+    assert hass.states.get("binary_sensor.outdoor_unit_outdoor_unit_running").state == "on"
+    # Back, still running: not learned as a start.
+    house.set_operating("primary", True)
+    await hass.async_block_till_done()
+    assert list(predictor.deficits) == learned
+    # Gone for good: after the hold it no longer counts as running.
+    hass.states.async_set(house.heads["primary"].operating, "unavailable")
+    await hass.async_block_till_done()
+    for _ in range(6):
+        freezer.tick(timedelta(seconds=61))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+    assert house.calls("hailee")[-1] == ("shared_heat", {"active": False, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
+
+
 async def test_head_offline_does_not_stop_others(hass: HomeAssistant, house: FakeHouse) -> None:
     hass.services.async_remove("esphome", "haileesbedroomhvac_shared_heat")
     await setup_supervisor(hass, house)
@@ -128,6 +156,9 @@ async def test_config_flow(hass: HomeAssistant, house: FakeHouse) -> None:
 
 
 async def test_forecast_lifecycle(hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory) -> None:
+    # The target is set before the supervisor starts: a start right after a
+    # target change is not learned.
+    house.set_climate("primary", room=19.70, target=19.72)
     await setup_supervisor(hass, house)
     assert house.calls("hailee", "shared_heat_expected") == [
         ("shared_heat_expected", {"expected_in_s": -1, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
