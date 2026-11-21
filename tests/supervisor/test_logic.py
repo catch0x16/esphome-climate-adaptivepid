@@ -121,6 +121,16 @@ def test_precedence_follows_the_configured_order():
     assert plans["primary"].shared_heat is True
 
 
+def test_precedence_from_the_order_of_the_heads():
+    # A head without hints ranked below a room is not heard by it.
+    order = ["primary", "main", "hailee"]
+    assert plan(heads(main=True), ORDER, order=order)["primary"].shared_heat is False
+    assert plan(heads(main=True), ORDER, order=order)["hailee"].shared_heat is True
+    assert plan(heads(primary=True), ORDER, order=order)["hailee"].shared_heat is True
+    # A head missing from the order ranks above every room.
+    assert plan(heads(main=True), ORDER, order=["primary", "hailee"])["primary"].shared_heat is True
+
+
 def test_one_hinted_room_hears_every_other_head():
     assert plan(heads(primary=True), ["hailee"])["hailee"].shared_heat is True
     assert plan(heads(main=True), ["hailee"])["hailee"].shared_heat is True

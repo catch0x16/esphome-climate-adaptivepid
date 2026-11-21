@@ -31,8 +31,10 @@ The measurements behind the coordination are in [research/shared-outdoor-unit.md
 **What it is.** A custom integration, `custom_components/climate_adaptivepid_supervisor/` in this repo, installed through HACS (Custom repositories → this repo, type Integration). It is event-driven, async Python on Home Assistant's event loop, with no app, websocket, token, Docker image or heavy dependencies.
 
 **Config flow.**
-- **Pick the heads on one outdoor unit:** their adaptive PID climates, at least two.
-- **Pick the rooms that receive hints, highest precedence first:** they need `start_control` (`discrete` or `continuous`) and the ESPHome action below.
+- **Pick the heads on one outdoor unit, highest precedence first:** their adaptive PID climates, at least two. Drag them to reorder.
+- **Then tick the rooms that receive hints**, from a checkbox list of those heads. They need `start_control` (`discrete` or `continuous`) and the ESPHome action below.
+
+The options flow has the same two steps, so the precedence and the hinted rooms can be changed later.
 - **Optionally, the outdoor temperature sensor**, for recovery estimates.
 
 For each head, the integration finds its `Operating` binary sensor and its ESPHome node name (from the head's ESPHome config entry) through the device registry.
@@ -45,7 +47,9 @@ For each head, the integration finds its `Operating` binary sensor and its ESPHo
 | Any operating | `shared_heat` on |
 | None operating, another predicted to start within 5 min | `shared_heat` off, `shared_heat_expected` in seconds |
 
-**Precedence.** "Other heads" means the heads that rank above the room. Every head that receives no hints ranks first (the main floor, which owns the heating). The hinted rooms follow in the order they are listed in the config flow, highest first. In this house that is main floor → primary bedroom → Hailee's room.
+**Precedence.** "Other heads" means the heads that rank above the room: the heads listed before it in "Heads on the outdoor unit". In this house that order is main floor → primary bedroom → Hailee's room. Put the head that owns the heating first; a head listed below a room is never heard by it.
+
+Before 0.10.0, the order of the heads didn't matter: heads without hints ranked first, then the hinted rooms in their own order. An entry saved then is migrated to that order once, so it behaves as before.
 - **Hailee's room** hears from both other heads.
 - **The primary** hears only from the main floor: it never waits for, defers to or parks because of Hailee's runs, and her head yields to it instead.
 - **Without precedence**, two hinted rooms would hold each other back: neither would start while the other runs, and each would defer to the other's forecast.
@@ -58,7 +62,7 @@ The leak runs mostly downhill anyway. Into the idle, powered primary (2026-11-16
 | Hailee's head | +0.008 °C/min |
 | Nothing | −0.011 °C/min |
 
-With a single hinted room, nothing changes: it hears from every other head.
+With a single hinted room listed last, it hears from every other head, as before.
 
 **Forecast.** A head on the regular PID path starts at a steady deficit below its target: the primary bedroom at 0.22–0.37 °C, median 0.32, over 62 starts. The primary is in continuous mode, on the regular path except while the main floor runs, so its deficit is still learnable. For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. Heat and cool starts are learned separately. The history is saved (see **Saved state** below), so forecasts carry on after a Home Assistant restart.
 
@@ -123,7 +127,7 @@ A target change that leaves the room at least 0.3 from the new target in the dir
 - **Diagnostics:** serialisable, with the plan, the hints sent and the statistics.
 - **The disable switch.**
 - **A head offline.**
-- **The config flow.**
+- **The config flow and options flow:** heads in order, then checkboxes for the hinted rooms, kept in the order of precedence. A version 1 entry migrated to its old precedence.
 
 **Next steps for the integration**, before any app:
 - **Hold off overshoot:** delay another head's run with a small low-power offset (5a's `apply_offset`) while a hinted room is near the top of its band.

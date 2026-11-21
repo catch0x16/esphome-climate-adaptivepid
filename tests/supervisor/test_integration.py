@@ -302,19 +302,58 @@ async def test_head_offline_does_not_stop_others(hass: HomeAssistant, house: Fak
 
 async def test_config_flow(hass: HomeAssistant, house: FakeHouse) -> None:
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
-    assert result["type"] is FlowResultType.FORM
-    heads = [h.climate for h in house.heads.values()]
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
+    main, primary, hailee = (house.heads[k].climate for k in ("main", "primary", "hailee"))
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        {"name": "Outdoor unit", CONF_HEADS: heads[:1], CONF_HINTED: []},
+        result["flow_id"], {"name": "Outdoor unit", CONF_HEADS: [main]}
     )
     assert result["errors"] == {CONF_HEADS: "need_two_heads"}
+    # The heads in order of precedence; then checkboxes for those heads only.
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        {"name": "Outdoor unit", CONF_HEADS: heads, CONF_HINTED: [heads[0]]},
+        result["flow_id"], {"name": "Outdoor unit", CONF_HEADS: [main, primary, hailee]}
     )
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "hinted"
+    options = result["data_schema"].schema[CONF_HINTED].config["options"]
+    assert [o["value"] for o in options] == [main, primary, hailee]
+    # Ticked in any order, kept in the order of precedence.
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_HINTED: [hailee, primary]})
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {CONF_HEADS: heads, CONF_HINTED: [heads[0]]}
+    assert result["data"] == {CONF_HEADS: [main, primary, hailee], CONF_HINTED: [primary, hailee]}
+    assert result["result"].version == 2
+
+
+async def test_options_flow_reorders_precedence(hass: HomeAssistant, house: FakeHouse) -> None:
+    entry = await setup_supervisor(hass, house, hinted=("primary", "hailee"))
+    main, primary, hailee = (house.heads[k].climate for k in ("main", "primary", "hailee"))
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["step_id"] == "init"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_HEADS: [main, hailee, primary]}
+    )
+    assert result["step_id"] == "hinted"
+    # The rooms ticked before are ticked again.
+    assert result["data_schema"]({}) == {CONF_HINTED: [primary, hailee]}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {CONF_HINTED: [primary, hailee]})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {CONF_HEADS: [main, hailee, primary], CONF_HINTED: [hailee, primary]}
+    await hass.async_block_till_done()
+
+    # Hailee's room now ranks above the primary: its run is shared heat for the primary.
+    on = ("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
+    house.heads["primary"].calls.clear()
+    house.set_operating("hailee", True)
+    await hass.async_block_till_done()
+    assert house.calls("primary") == [on]
+
+
+async def test_version_1_entry_keeps_its_precedence(hass: HomeAssistant, house: FakeHouse) -> None:
+    # Version 1 ranked the heads without hints first, then the hinted rooms in
+    # their own order, whatever the order of the heads.
+    entry = await setup_supervisor(hass, house, hinted=("primary", "hailee"))
+    main, primary, hailee = (house.heads[k].climate for k in ("main", "primary", "hailee"))
+    assert entry.version == 2
+    assert entry.data[CONF_HEADS] == [main, primary, hailee]
+    assert entry.data[CONF_HINTED] == [primary, hailee]
 
 
 async def test_forecast_lifecycle(hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory) -> None:

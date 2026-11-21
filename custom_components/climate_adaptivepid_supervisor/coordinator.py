@@ -69,8 +69,10 @@ class HeadEntities:
 
 def _head_options(entry: ConfigEntry) -> tuple[list[str], list[str], str | None]:
     data = {**entry.data, **entry.options}
+    # In order of precedence, highest first.
     heads = list(data.get(CONF_HEADS, []))
-    hinted = [h for h in data.get(CONF_HINTED, []) if h in heads]
+    configured = data.get(CONF_HINTED, [])
+    hinted = [h for h in heads if h in configured]
     return heads, hinted, data.get(CONF_OUTDOOR) or None
 
 
@@ -334,7 +336,7 @@ class SupervisorCoordinator:
             self._report_conflict(conflict)
         elif conflict is None:
             self._report_conflict(None)
-        self.plans = plan(heads, self.hinted, expected)
+        self.plans = plan(heads, self.hinted, expected, order=self.heads)
         if self.enabled:
             for climate, room_plan in self.plans.items():
                 await self._send(climate, room_plan, renew)

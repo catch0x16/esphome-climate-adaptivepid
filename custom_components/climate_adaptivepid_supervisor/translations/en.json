@@ -3,22 +3,27 @@
     "step": {
       "user": {
         "title": "Heads on one outdoor unit",
-        "description": "Pick the climate_adaptivepid climates that share one outdoor unit, and the rooms that should receive hints. Hinted heads need start control and the shared_heat ESPHome action.",
+        "description": "Pick the climate_adaptivepid climates that share one outdoor unit, in order of precedence. Next, pick which of them receive hints.",
         "data": {
           "name": "Name",
-          "heads": "Heads on the outdoor unit",
-          "hinted": "Rooms that receive hints, highest precedence first",
+          "heads": "Heads on the outdoor unit, highest precedence first",
           "outdoor": "Outdoor temperature (optional)"
         },
         "data_description": {
-          "hinted": "Each room counts only the heads above it: every head not listed here, then the rooms before it. It never waits for or parks because of a room below it.",
+          "heads": "Highest precedence first: drag to reorder. A room that receives hints hears only from the heads above it, so it never waits for or parks because of a head below it. Put the head that owns the heating first.",
           "outdoor": "Used to estimate how long each room takes to recover to its target. Without it, heat loss is left out."
+        }
+      },
+      "hinted": {
+        "title": "Rooms that receive hints",
+        "description": "Tick the heads that should receive hints. They need start control (discrete or continuous) and the shared_heat ESPHome action.",
+        "data": {
+          "hinted": "Rooms that receive hints"
         }
       }
     },
     "error": {
-      "need_two_heads": "Pick at least two heads.",
-      "hinted_not_in_heads": "Hinted rooms must be among the heads."
+      "need_two_heads": "Pick at least two heads."
     },
     "abort": {
       "already_configured": "These heads are already supervised."
@@ -28,19 +33,24 @@
     "step": {
       "init": {
         "data": {
-          "heads": "Heads on the outdoor unit",
-          "hinted": "Rooms that receive hints, highest precedence first",
+          "heads": "Heads on the outdoor unit, highest precedence first",
           "outdoor": "Outdoor temperature (optional)"
         },
         "data_description": {
-          "hinted": "Each room counts only the heads above it: every head not listed here, then the rooms before it. It never waits for or parks because of a room below it.",
+          "heads": "Highest precedence first: drag to reorder. A room that receives hints hears only from the heads above it, so it never waits for or parks because of a head below it. Put the head that owns the heating first.",
           "outdoor": "Used to estimate how long each room takes to recover to its target. Without it, heat loss is left out."
+        }
+      },
+      "hinted": {
+        "title": "Rooms that receive hints",
+        "description": "Tick the heads that should receive hints. They need start control (discrete or continuous) and the shared_heat ESPHome action.",
+        "data": {
+          "hinted": "Rooms that receive hints"
         }
       }
     },
     "error": {
-      "need_two_heads": "Pick at least two heads.",
-      "hinted_not_in_heads": "Hinted rooms must be among the heads."
+      "need_two_heads": "Pick at least two heads."
     }
   },
   "entity": {

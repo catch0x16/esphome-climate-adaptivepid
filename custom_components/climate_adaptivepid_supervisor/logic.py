@@ -22,9 +22,9 @@ head is expected to start, so it can wait for that heat instead of starting a
 run that stacks on top of it. Runs also delay each other: a bedroom's run
 warms the other bedroom and pushes its start back by several minutes.
 
-Heads have a precedence: the heads that receive no hints rank first (the main
-floor, which owns the heating), then the hinted rooms in the order they are
-configured. A room hears only from the heads above it, so it never waits for,
+Heads have a precedence: the order they are configured in, highest first (in
+this house the main floor, which owns the heating, then the primary bedroom,
+then Hailee's room). A room hears only from the heads above it, so it never waits for,
 defers to or parks for a head below it; that head yields to it instead.
 Without this, two hinted rooms would hold each other back. The leak runs
 mostly downhill anyway: the main floor's runs warm the primary bedroom by
@@ -399,18 +399,25 @@ def plan_room(
 
 
 def plan(
-    heads: dict[str, Head], hinted: list[str], expected: dict[str, float | None] | None = None
+    heads: dict[str, Head],
+    hinted: list[str],
+    expected: dict[str, float | None] | None = None,
+    order: list[str] | None = None,
 ) -> dict[str, RoomPlan]:
     """The hints for every hinted room that should get one.
 
-    `hinted` is in order of precedence, highest first; every head that is not
-    hinted ranks above all of them.
+    `order` is every head in order of precedence, highest first; a head not in
+    it ranks above all of them. Without it, the heads that are not hinted rank
+    first, then the hinted rooms in their own order.
     """
+    if order is None:
+        order = [key for key in heads if key not in hinted] + list(hinted)
+    rank = {key: index for index, key in enumerate(order)}
     plans: dict[str, RoomPlan] = {}
-    above = {key for key in heads if key not in hinted}
     for name in hinted:
-        room_plan = plan_room(name, heads, expected, above=set(above))
-        above.add(name)
+        mine = rank.get(name, len(order))
+        above = {key for key in heads if key != name and rank.get(key, -1) < mine}
+        room_plan = plan_room(name, heads, expected, above=above)
         if room_plan is not None:
             plans[name] = room_plan
     return plans
