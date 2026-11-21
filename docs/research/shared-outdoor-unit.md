@@ -11,6 +11,7 @@ Numbers come from one house over a few nights, at outdoor temperatures of about 
 - [The unit's own thermostat](#the-units-own-thermostat)
 - [What the unit reports](#what-the-unit-reports)
 - [The shared outdoor unit leaks heat into idle heads](#the-shared-outdoor-unit-leaks-heat-into-idle-heads)
+- [Main floor mornings](#main-floor-mornings)
 - [Coast after a run](#coast-after-a-run)
 - [What controls exist on these units, and what don't](#what-controls-exist-on-these-units-and-what-dont)
 - [What was tried](#what-was-tried)
@@ -112,6 +113,32 @@ The leak shows up the same way during bursts. Coast after Hailee's head stopped,
   - **In the 2 minutes before the 16 cuts on 17–18 November:** median +0.14 °C/min.
   - **In the 2 minutes after:** median −0.03 °C/min.
   - **Rise after a cut:** median +0.11 (max +0.18) on 16–17 November.
+
+## Main floor mornings
+
+Findings from 17–21 November 2026, at outdoor temperatures of about 2–10 °C. The main floor's schedule raises its target at 06:30, and it then runs for 66–101 minutes. The primary bedroom was not under start control, had `off_threshold` 0.75 with `off_delay` 5 min, and received no hints.
+
+| Morning | Primary vs target when the main floor started | Primary peak | Primary's own runs | Power cut by hysteresis |
+|---|---|---|---|---|
+| 17 Nov | −0.05 | +0.82 | 0 | +18 min |
+| 18 Nov | +0.14 | +1.00 | 0 | +26 min |
+| 19 Nov | −0.20 | +1.03 | 0 | +23 min |
+| 20 Nov | −0.11 | +1.17 | 0 | +24 min |
+| 21 Nov | +0.06 | +0.90 | 0 | +26 min |
+
+- **The heat came from the main floor.** The primary crossed +0.4 11–16 minutes after the main floor started.
+- **The hold didn't stop it.** The setpoint held at 18.0 during `off_delay`, and the room kept warming.
+- **The cut did.** After each power cut, the room rose only 0–0.08 more and then fell.
+
+Leak into the primary while it was powered and its own head had been off for at least 10 minutes (2-minute slopes):
+
+| Running | Median | p75 | Samples |
+|---|---|---|---|
+| Main floor | +0.043 °C/min | +0.062 | 233 |
+| Hailee's head | +0.008 °C/min | +0.045 | 250 |
+| Nothing | −0.011 °C/min | 0.000 | 675 |
+
+So the primary needs start control's parking against the main floor. Hailee's leak into it is small, which is why the supervisor ranks the primary above Hailee's room (see [precedence](../supervisor-design.md#release-1-coordination-implemented)).
 
 ## Coast after a run
 

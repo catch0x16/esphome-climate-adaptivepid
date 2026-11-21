@@ -29,14 +29,16 @@ from custom_components.climate_adaptivepid_supervisor.const import (
 from .conftest import FakeHouse
 
 
-async def setup_supervisor(hass: HomeAssistant, house: FakeHouse, entry_id: str | None = None) -> MockConfigEntry:
+async def setup_supervisor(
+    hass: HomeAssistant, house: FakeHouse, entry_id: str | None = None, hinted: tuple[str, ...] = ("hailee",)
+) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         entry_id=entry_id,
         title="Outdoor unit",
         data={
             CONF_HEADS: [h.climate for h in house.heads.values()],
-            CONF_HINTED: [house.heads["hailee"].climate],
+            CONF_HINTED: [house.heads[key].climate for key in hinted],
         },
     )
     entry.add_to_hass(hass)
@@ -74,6 +76,34 @@ async def test_hint_lifecycle(hass: HomeAssistant, house: FakeHouse) -> None:
     house.set_operating("primary", False)
     await hass.async_block_till_done()
     assert house.calls("hailee") == [("shared_heat", {"active": False, "valid_for_s": SHARED_HEAT_VALID_SECONDS})]
+
+
+async def test_precedence_between_hinted_rooms(hass: HomeAssistant, house: FakeHouse) -> None:
+    await setup_supervisor(hass, house, hinted=("primary", "hailee"))
+    on = ("shared_heat", {"active": True, "valid_for_s": SHARED_HEAT_VALID_SECONDS})
+
+    # Hailee's run ranks below the primary: nothing new for the primary.
+    house.heads["primary"].calls.clear()
+    house.set_operating("hailee", True)
+    await hass.async_block_till_done()
+    assert house.calls("primary") == []
+    house.set_operating("hailee", False)
+    await hass.async_block_till_done()
+
+    # The main floor ranks above both.
+    house.heads["primary"].calls.clear()
+    house.heads["hailee"].calls.clear()
+    house.set_operating("main", True)
+    await hass.async_block_till_done()
+    assert house.calls("primary") == [on] and house.calls("hailee") == [on]
+    house.set_operating("main", False)
+    await hass.async_block_till_done()
+
+    # The primary ranks above Hailee's room.
+    house.heads["hailee"].calls.clear()
+    house.set_operating("primary", True)
+    await hass.async_block_till_done()
+    assert house.calls("hailee") == [on]
 
 
 async def test_own_run_is_not_shared(hass: HomeAssistant, house: FakeHouse) -> None:

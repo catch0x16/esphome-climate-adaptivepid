@@ -1,6 +1,6 @@
 # Start control
 
-**Status: implemented** (`pid: start_control`, off by default). Enabled on the second bedroom ("Hailee's room").
+**Status: implemented** (`pid: start_control`, off by default). Enabled on the second bedroom ("Hailee's room") and, since 2026-11-21, on the primary bedroom, so it parks while the main floor's morning warm-up leaks into it (see [research](research/shared-outdoor-unit.md#main-floor-mornings)).
 
 Start control replaces "round the PID's output to the device's step and send it" with an explicit mapping. The PID's output is compared with the room temperature the way the unit compares its setpoint with it, and the matching one of three setpoint levels is sent. A state machine tracks what the unit does with that level, and switches a head off when heat is leaking in from other heads on a shared outdoor unit.
 

@@ -9,8 +9,8 @@ head runs, an idle head that is still powered keeps receiving refrigerant and
 its fan carries that into its room. A head can only infer that from its own
 room; the supervisor sees every head's `operating` and knows for certain.
 
-For each room that receives hints, shared heat is on while any *other* head in
-the group is operating; the room's own run never counts. The head decides what
+For each room that receives hints, shared heat is on while any head that ranks
+above it is operating; the room's own run never counts. The head decides what
 to do with it: it starts no run of its own while shared heat is on, and parks
 (switches off) at once once its room is past its hysteresis off_threshold.
 
@@ -21,6 +21,14 @@ temperature and how fast it is falling. A hinted room is told when another
 head is expected to start, so it can wait for that heat instead of starting a
 run that stacks on top of it. Runs also delay each other: a bedroom's run
 warms the other bedroom and pushes its start back by several minutes.
+
+Heads have a precedence: the heads that receive no hints rank first (the main
+floor, which owns the heating), then the hinted rooms in the order they are
+configured. A room hears only from the heads above it, so it never waits for,
+defers to or parks for a head below it; that head yields to it instead.
+Without this, two hinted rooms would hold each other back. The leak runs
+mostly downhill anyway: the main floor's runs warm the primary bedroom by
++0.04 C/min, Hailee's runs warm it by +0.01.
 """
 
 from __future__ import annotations
@@ -351,22 +359,31 @@ def outdoor_unit_running(heads: dict[str, Head]) -> bool:
 
 
 def plan_room(
-    name: str, heads: dict[str, Head], expected: dict[str, float | None] | None = None
+    name: str,
+    heads: dict[str, Head],
+    expected: dict[str, float | None] | None = None,
+    above: set[str] | None = None,
 ) -> RoomPlan | None:
     """The hint for one room, or None when nothing should be sent.
 
-    `expected` holds each head's forecast start (seconds), if any.
+    `expected` holds each head's forecast start (seconds), if any. `above` is
+    the heads whose runs and forecasts count for this room (None: every other
+    head).
     """
     head = heads.get(name)
     if head is None or head.mode not in ("heat", "cool"):
         return None
-    running = sorted(other.name for key, other in heads.items() if key != name and other.operating)
+
+    def counts(key: str) -> bool:
+        return key != name and (above is None or key in above)
+
+    running = sorted(other.name for key, other in heads.items() if counts(key) and other.operating)
     if running:
         return RoomPlan(shared_heat=True, reason=f"{', '.join(running)} running")
     due = [
         (seconds, heads[key].name)
         for key, seconds in (expected or {}).items()
-        if key != name and key in heads and seconds is not None and seconds <= EXPECT_WINDOW_S
+        if counts(key) and key in heads and seconds is not None and seconds <= EXPECT_WINDOW_S
     ]
     if due:
         seconds, who = min(due)
@@ -375,16 +392,25 @@ def plan_room(
             reason=f"{who} expected to start in {round(seconds)} s",
             expected_in_s=int(round(seconds)),
         )
+    below = sorted(other.name for key, other in heads.items() if key != name and not counts(key) and other.operating)
+    if below:
+        return RoomPlan(shared_heat=False, reason=f"{', '.join(below)} running, ranks below")
     return RoomPlan(shared_heat=False, reason="no other head running")
 
 
 def plan(
     heads: dict[str, Head], hinted: list[str], expected: dict[str, float | None] | None = None
 ) -> dict[str, RoomPlan]:
-    """The hints for every hinted room that should get one."""
+    """The hints for every hinted room that should get one.
+
+    `hinted` is in order of precedence, highest first; every head that is not
+    hinted ranks above all of them.
+    """
     plans: dict[str, RoomPlan] = {}
+    above = {key for key in heads if key not in hinted}
     for name in hinted:
-        room_plan = plan_room(name, heads, expected)
+        room_plan = plan_room(name, heads, expected, above=set(above))
+        above.add(name)
         if room_plan is not None:
             plans[name] = room_plan
     return plans

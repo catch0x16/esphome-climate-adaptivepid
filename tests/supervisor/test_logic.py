@@ -83,6 +83,49 @@ def test_forecast_from_other_heads_only():
     assert plan_room("hailee", heads(), {"hailee": 30.0, "main": 400.0}).expected_in_s is None
 
 
+# Main floor (not hinted) -> primary -> Hailee's room.
+ORDER = ["primary", "hailee"]
+
+
+def test_precedence_main_floor_heats_both_bedrooms():
+    plans = plan(heads(main=True), ORDER)
+    assert plans["primary"].shared_heat is True and plans["hailee"].shared_heat is True
+
+
+def test_precedence_primary_ignores_a_lower_room():
+    plans = plan(heads(hailee=True), ORDER)
+    assert plans["primary"].shared_heat is False
+    assert plans["primary"].reason == "hailee running, ranks below"
+    assert plans["hailee"].shared_heat is False  # its own run
+
+
+def test_precedence_lower_room_yields_to_a_higher_one():
+    plans = plan(heads(primary=True), ORDER)
+    assert plans["hailee"].shared_heat is True
+    assert plans["primary"].shared_heat is False and plans["primary"].reason == "no other head running"
+
+
+def test_precedence_forecasts_only_from_above():
+    plans = plan(heads(), ORDER, {"primary": 120.0, "hailee": 60.0, "main": None})
+    assert plans["primary"].expected_in_s is None
+    assert plans["hailee"].expected_in_s == 120
+    # The main floor's forecast counts for both.
+    plans = plan(heads(), ORDER, {"primary": None, "hailee": None, "main": 200.0})
+    assert plans["primary"].expected_in_s == 200 and plans["hailee"].expected_in_s == 200
+
+
+def test_precedence_follows_the_configured_order():
+    plans = plan(heads(primary=True), ["hailee", "primary"])
+    assert plans["hailee"].shared_heat is False
+    plans = plan(heads(hailee=True), ["hailee", "primary"])
+    assert plans["primary"].shared_heat is True
+
+
+def test_one_hinted_room_hears_every_other_head():
+    assert plan(heads(primary=True), ["hailee"])["hailee"].shared_heat is True
+    assert plan(heads(main=True), ["hailee"])["hailee"].shared_heat is True
+
+
 def primary(room: float, operating: bool = False) -> Head:
     return Head(name="primary", operating=operating, mode="heat", room=room, target=19.72)
 
