@@ -11,6 +11,7 @@
 #include "room_model.h"
 #include "shared_heat_detector.h"
 #include "start_controller.h"
+#include "start_engagement.h"
 #include "tuning_rule.h"
 
 namespace workflow {
@@ -27,13 +28,26 @@ namespace workflow {
 
             // Start control (start_controller.h): replaces the PID -> rounded
             // setpoint path when enabled.
-            bool startControl{false};
+            workflow::start::StartMode startMode{workflow::start::StartMode::OFF};
             workflow::start::StartConfig startConfig{};
             workflow::start::StartController startCtl;
             workflow::start::SharedHeatDetector detector;
             workflow::start::BurstLearner bursts;
             // The PID's output on the last start-control update.
             float startOutput{NAN};
+            // Continuous mode: when start control is engaged, and the power
+            // changes and stops seen while it is not (passed on when it engages).
+            workflow::start::StartEngagement engagement;
+            bool seenPowered{false};
+            bool seenOperating{false};
+            bool seenState{false};
+            bool powerChanged{false};
+            uint32_t powerChangeMs{0};
+            bool stopped{false};
+            uint32_t stopMs{0};
+            // True when start control drove the device this update.
+            bool runEngagement(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager);
+            void noteContinuous(bool powered, bool operating, uint32_t now);
 
             void runStartControl(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager);
             TuningConfig tuning;
@@ -84,8 +98,18 @@ namespace workflow {
             void setHumidity(float value) { this->humidity = value; }
 
             // Start control (docs/start-control-design.md).
-            void configureStartControl(const workflow::start::StartConfig &config);
-            bool isStartControl() const { return this->startControl; }
+            void configureStartControl(const workflow::start::StartConfig &config, workflow::start::StartMode mode);
+            // Start control is configured (discrete or continuous): the head takes hints.
+            bool isStartControl() const { return this->startMode != workflow::start::StartMode::OFF; }
+            workflow::start::StartMode getStartMode() const { return this->startMode; }
+            // Where start control parks on shared heat.
+            float startConfigOffThreshold() const { return this->startConfig.off_threshold; }
+            // Start control drives the device now: always when discrete, while
+            // engaged when continuous.
+            bool startControlEngaged() const {
+                return this->startMode == workflow::start::StartMode::DISCRETE ||
+                       (this->startMode == workflow::start::StartMode::CONTINUOUS && this->engagement.engaged());
+            }
             workflow::start::HeadState startState() const { return this->startCtl.state(); }
             bool sharedHeat() const;
             // The PID's output (the setpoint it asks for) under start control; NaN before the first update.

@@ -124,8 +124,12 @@ namespace workflow {
                 }
             }
 
-            if (this->startControl) {
+            if (this->startMode == workflow::start::StartMode::DISCRETE) {
                 this->runStartControl(currentTemperature, deviceManager);
+                return;
+            }
+            if (this->startMode == workflow::start::StartMode::CONTINUOUS &&
+                this->runEngagement(currentTemperature, deviceManager)) {
                 return;
             }
 
@@ -166,10 +170,69 @@ namespace workflow {
             }
         }
 
-        void PidWorkflowStep::configureStartControl(const workflow::start::StartConfig &config) {
-            this->startControl = true;
+        void PidWorkflowStep::configureStartControl(const workflow::start::StartConfig &config,
+                                                    workflow::start::StartMode mode) {
+            this->startMode = mode;
             this->startConfig = config;
             this->startCtl.configure(config);
+            this->engagement.configure(config.min_cycle_ms, config.expect_window_s);
+        }
+
+        void PidWorkflowStep::noteContinuous(bool powered, bool operating, uint32_t now) {
+            if (this->seenState) {
+                if (powered != this->seenPowered) {
+                    this->powerChanged = true;
+                    this->powerChangeMs = now;
+                }
+                if (this->seenOperating && !operating) {
+                    this->stopped = true;
+                    this->stopMs = now;
+                }
+            }
+            this->seenState = true;
+            this->seenPowered = powered;
+            this->seenOperating = operating;
+        }
+
+        bool PidWorkflowStep::runEngagement(const float currentTemperature, devicestate::IDeviceStateManager* deviceManager) {
+            using namespace workflow::start;
+            const uint32_t now = esphome::millis();
+            const bool powered = deviceManager->isInternalPowerOn();
+            const bool operating = powered && deviceManager->getDeviceStatus().operating;
+            const bool hint = this->detector.hint(now);
+            const float expected = this->detector.expected_in_s(now);
+            const bool signal = this->engagement.signal(hint, expected);
+            if (!this->engagement.engaged() && !signal) {
+                this->noteContinuous(powered, operating, now);
+                return false;
+            }
+            if (!this->engagement.engaged()) {
+                StartInput in;
+                in.now_ms = now;
+                in.heating = deviceManager->getOffsetDirection();
+                in.powered = powered;
+                in.operating = operating;
+                this->startCtl.resync(in, this->powerChanged, this->powerChangeMs, this->stopped, this->stopMs);
+                ESP_LOGI(TAG, "Start control engaged: %s; taking over %s (room %.2f, target %.2f)",
+                    hint ? "a higher-ranked head is running" : "a higher-ranked head is expected to start",
+                    head_state_to_string(this->startCtl.state()), currentTemperature,
+                    deviceManager->getTargetTemperature());
+            }
+            this->runStartControl(currentTemperature, deviceManager);
+            const HeadState state = this->startCtl.state();
+            const EngageChange change =
+                this->engagement.update(now, signal, state == HeadState::IDLE || state == HeadState::PARKED);
+            if (change == EngageChange::RELEASED) {
+                this->adaptivePID->set_integral_frozen(false);
+                this->seenState = false;
+                this->powerChanged = false;
+                this->stopped = false;
+                this->noteContinuous(deviceManager->isInternalPowerOn(),
+                    deviceManager->isInternalPowerOn() && deviceManager->getDeviceStatus().operating, now);
+                ESP_LOGI(TAG, "Start control released: no higher-ranked head running or expected; continuous from %s (room %.2f, target %.2f)",
+                    head_state_to_string(state), currentTemperature, deviceManager->getTargetTemperature());
+            }
+            return true;
         }
 
         void PidWorkflowStep::setSharedHeatHint(bool active, uint32_t validMs) {
@@ -237,7 +300,10 @@ namespace workflow {
             const StartDecision decision = this->startCtl.update(in);
             this->adaptivePID->set_integral_frozen(decision.freeze_integral);
 
-            if (this->bursts.update(now, heating, decision.state, powered, currentTemperature, shared)) {
+            // Runs are learned only in discrete mode: a continuous head is under
+            // start control in stretches, so its runs and coasts are cut short.
+            if (this->startMode == StartMode::DISCRETE &&
+                this->bursts.update(now, heating, decision.state, powered, currentTemperature, shared)) {
                 const BurstState &b = this->bursts.state();
                 ESP_LOGI(TAG, "Start control learned: gain alone %.2f (%u runs), shared %.2f (%u runs); coast alone %.2f, shared %.2f, after %.1f min",
                     b.gain[0], static_cast<unsigned>(b.gain_count[0]), b.gain[1], static_cast<unsigned>(b.gain_count[1]),

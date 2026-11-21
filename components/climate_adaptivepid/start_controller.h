@@ -218,6 +218,35 @@ class StartController {
     return this->has_stop_ ? now_ms - this->last_stop_ms_ : UINT32_MAX;
   }
 
+  // Continuous mode only (start_engagement.h): take over a head the regular
+  // PID path has been driving. The state is adopted from the device (off:
+  // PARKED, running: RUN, else IDLE). The last stop and power change seen
+  // while not engaged are passed in, so the minimum cycle still holds across
+  // the change; without them the ones this controller saw last are kept.
+  void resync(const StartInput &in, bool power_changed, uint32_t power_change_ms, bool stopped, uint32_t stop_ms) {
+    this->initialized_ = true;
+    this->heating_ = in.heating;
+    this->level_ = Level::OFF;
+    this->deferring_ = false;
+    this->fault_reported_ = false;
+    this->operating_since_valid_ = false;
+    this->stop_cmd_ms_ = in.now_ms - this->config_.stop_grace_ms;
+    if (!in.powered) {
+      this->state_ = HeadState::PARKED;
+    } else if (in.operating) {
+      this->state_ = HeadState::RUN;
+      this->start_ms_ = in.now_ms;
+    } else {
+      this->state_ = HeadState::IDLE;
+    }
+    if (power_changed) {
+      this->note_power_change_(power_change_ms);
+    }
+    if (stopped) {
+      this->note_stop_(stop_ms);
+    }
+  }
+
   StartDecision update(const StartInput &in) {
     StartDecision out;
     const float sign = in.heating ? 1.0f : -1.0f;

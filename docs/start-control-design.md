@@ -1,6 +1,12 @@
 # Start control
 
-**Status: implemented** (`pid: start_control`, off by default). Enabled on the second bedroom ("Hailee's room") and, since 2026-11-21, on the primary bedroom, so it parks while the main floor's morning warm-up leaks into it (see [research](research/shared-outdoor-unit.md#main-floor-mornings)).
+**Status: implemented** (`pid: start_control`, `off` by default).
+
+| Mode | What it does | Used on |
+|---|---|---|
+| `off` (or `false`) | The regular PID path | Main floor |
+| `discrete` (or `true`) | Start control always, as described below | The second bedroom ("Hailee's room") |
+| `continuous` | The regular PID path; start control only while a higher-ranked head runs (see [Continuous mode](#continuous-mode)) | The primary bedroom, since 2026-11-21, so it parks while the main floor's morning warm-up leaks into it (see [research](research/shared-outdoor-unit.md#main-floor-mornings)) |
 
 Start control replaces "round the PID's output to the device's step and send it" with an explicit mapping. The PID's output is compared with the room temperature the way the unit compares its setpoint with it, and the matching one of three setpoint levels is sent. A state machine tracks what the unit does with that level, and switches a head off when heat is leaking in from other heads on a shared outdoor unit.
 
@@ -14,6 +20,7 @@ The measurements behind every rule here are in [research/shared-outdoor-unit.md]
 - [Transitions](#transitions)
 - [Shared heat](#shared-heat)
 - [Learning](#learning)
+- [Continuous mode](#continuous-mode)
 - [Configuration](#configuration)
 - [What it changes elsewhere](#what-it-changes-elsewhere)
 - [Supervisor hints](#supervisor-hints)
@@ -132,6 +139,38 @@ Gain and coast no longer drive any decision: the PID's output decides when to st
 - **Discarded runs:** a run whose coast was cut short (device switched off, a new start) is not recorded, because it would understate the coast.
 - **Persistence:** saved in its own preference (`BURSTS_PREFERENCE_TYPE`) on the same schedule as the room model and on safe shutdown. `reset_tuning()` clears it.
 
+## Continuous mode
+
+**Why.** Some heads need start control only while another head leaks heat into them. The primary bedroom shows it:
+- **Its own cycles are fine** on the regular path, with a 0.75 band and `off_delay` 5 min.
+- **The main floor's morning runs** warm it about 0.04 °C/min with no run of its own. Holding the setpoint during `off_delay` doesn't stop that, so it peaked at +0.8…+1.2.
+- **Always-on start control** would fix the mornings, but it would also change every cycle of its own. Its own coasts would go past a tight +0.4 band about 5 times a night.
+
+**What it does.** The head runs the regular PID path, with its own hysteresis band, until start control engages. While engaged, it behaves exactly as in discrete mode: no runs of its own, park at once past `shared_off_threshold`, switch back on to catch the other head's heat.
+
+| | Rule |
+|---|---|
+| **Engages** | The supervisor's `shared_heat` hint is on, or it forecasts a start within 5 min. The supervisor sends a room only the heads that rank above it (see [precedence](supervisor-design.md#release-1-coordination-implemented)). The local detector doesn't count: that leak can be below what it detects, and a false trigger would change the head's behaviour for nothing. |
+| **On entry** | The state is adopted from the device: off is PARKED, running is RUN, otherwise IDLE. The last stop and power change seen on the regular path carry over, so `min_cycle_duration` still holds. A run of its own is stopped at once by the shared heat; the other head's heat replaces it. The integral carries over. |
+| **Released** | Neither signal for `min_cycle_duration`, **and** IDLE or PARKED, so a run it started finishes first. |
+| **After release** | The regular path again. A parked head stays off until the hysteresis switches it on at `on_threshold`, as after a hysteresis cut. |
+
+**Rules while engaged:**
+- **Parking** happens at once past `hysteresis: shared_off_threshold` (default `off_threshold`). The regular path keeps `off_threshold`, so the head's own band doesn't change.
+- **Hysteresis never switches the head on**, as in discrete mode.
+- **Runs aren't learned.** Start control drives the head only in stretches, so its coasts would be cut short.
+
+```yaml
+    pid:
+      start_control: continuous
+    hysteresis:
+      off_threshold: 0.75              # the head's own band, as on the regular path
+      off_delay: 5min
+      shared_off_threshold: 0.4        # parked at once past this while a higher-ranked head runs
+```
+
+**Diagnostics:** `Control state` is 4 (CONTINUOUS) while not engaged. Engaging and release are logged at INFO.
+
 ## Configuration
 
 ```yaml
@@ -141,7 +180,7 @@ climate:
     pid:
       max_adjustment_under: 1.0        # the PID's output stays within target - 1.0 ...
       max_adjustment_over: 0.5         # ... target + 0.5
-      start_control: true
+      start_control: discrete          # true also works
     hysteresis:                        # required with start_control
       on_threshold: 0.25               # a parked head is switched back on (idle) this far below target
       off_threshold: 0.4               # parked this far past target (at once with shared heat)
@@ -152,11 +191,12 @@ climate:
 
 Validation rejects:
 - **`start_threshold`, `start_timeout` and the `start_threshold_sensor`:** removed; the PID's output decides when a run starts and how long a start is held.
-- **`start_control` without `hysteresis`.**
+- **`start_control` without `hysteresis`**, in either mode.
+- **`shared_off_threshold` without `start_control: continuous`:** discrete mode parks at `off_threshold`.
 - **`park_when_shared`, `park_margin` and the `leak_rate` sensor:** removed; parking follows the hysteresis band.
 
 **Diagnostics** (created only with start control):
-- **`Control state`:** 0 IDLE, 1 START, 2 RUN, 3 PARKED.
+- **`Control state`:** 0 IDLE, 1 START, 2 RUN, 3 PARKED, 4 CONTINUOUS (continuous mode, not engaged).
 - **`Shared heat`.**
 - **`PID Set Point`** shows the PID's output (O, continuous); `Set Point` shows the level sent to the unit.
 
@@ -201,7 +241,8 @@ The head makes every power decision itself; the hints only tell it, for certain,
 | `start_controller.h` | Levels and state machine (pure, tested natively) |
 | `shared_heat_detector.h` | Local detector and hint expiry (pure) |
 | `burst_learner.h` | Gain and coast learning (pure); coast time for the detector, the rest logged |
-| `pid_workflowstep.cpp` (`runStartControl`) | Wiring: the PID's output, detector, learner and controller; applies power and setpoints |
+| `start_engagement.h` | Continuous mode: when start control engages and is released (pure) |
+| `pid_workflowstep.cpp` (`runStartControl`, `runEngagement`) | Wiring: the PID's output, detector, learner and controller; applies power and setpoints; engaging and releasing in continuous mode |
 | `climate_device_adapter.cpp` | `internalTurnOnAt` (switch on at a given setpoint) and `internalSetDeviceTemperature` (exact level, no deadband) |
 | `hysterisis_workflowstep.*` | The cut after `off_delay` and the hold; `setTurnOnEnabled(false)` under start control |
 | `climate_adaptivepid.*`, `climate.py` | Options, diagnostics, persistence, hint methods, power-on at the idle setpoint |
@@ -212,7 +253,10 @@ The head makes every power decision itself; the hints only tell it, for certain,
   - **`test_start_controller.cpp`:** the level at the O − R boundaries and the deadband, the start level from R (20.08 → 20.5, 19.92 → 20.0, 20.00 → 20.0), the running level, the PID stop only after `min_run`, the off level within `stop_grace`, a restart at the running level tracked as a run, the minimum cycle, no start with shared heat or while hysteresis holds, run confirmation, the start fault, deferral, catch and stopping for expected heat, staying powered inside the band, parking past `off_threshold` on shared heat and unparking past `on_threshold` with throttling, a hold stopping a run or start, the integral frozen only while parked, and cooling.
   - **`test_shared_heat_detector.cpp`:** detection with and without humidity, rejection when humidity is steady, eligibility, cooling, and hint expiry.
   - **`test_burst_learner.cpp`:** gain and coast alone vs shared, discarding coasts cut short and starts that never ran, and restoring state.
-- **Host scenario:** `tests/fixtures/start_control.yaml`, a smoke test of idle power-on, staying powered on shared heat inside the band, parking at once past `off_threshold` on shared heat, unparking at `on_threshold`, and the hysteresis cut after `off_delay` without shared heat.
+  - **`test_start_engagement.cpp`:** engaging on a hint or a forecast within the window, holding through a short gap, releasing only after `min_cycle_duration` and only once settled, and time wrapping around. `test_start_controller.cpp` also covers `resync`: the state adopted from the device, the minimum cycle across the change, and catching heat while parked.
+- **Host scenarios:**
+  - **`tests/fixtures/start_control.yaml` (discrete):** idle power-on, staying powered on shared heat inside the band, parking at once past `off_threshold` on shared heat, unparking at `on_threshold`, and the hysteresis cut after `off_delay` without shared heat.
+  - **`tests/fixtures/start_control_continuous.yaml`:** the regular path with no hint, then engaging and parking at once past `shared_off_threshold` (inside the 0.75 band), released after `min_cycle_duration`, and switched back on by the hysteresis at `on_threshold`.
 - **Live checks for Hailee's room**, against 2026-11-18/19:
   - every start level is followed by `operating` within about 20 s,
   - the share of the night within ±0.25, above +0.5 and below −0.5, and the warmest and coldest,

@@ -79,7 +79,6 @@ climate:
       max_adjustment_under: 2.0
       max_adjustment_over: 2.0
       start_control: true
-      start_threshold: 0.5
       initial_heat_rate: 2.5
       initial_cool_rate: 1.5
     hysteresis:

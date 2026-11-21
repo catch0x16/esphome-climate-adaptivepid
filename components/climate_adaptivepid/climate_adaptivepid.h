@@ -64,7 +64,8 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_max_adjustment_over(float value) { this->max_adjustment_over_ = value; }
   void set_setpoint_deadband(float value) { this->setpoint_deadband_ = value; }
   // Start control (docs/start-control-design.md).
-  void set_start_control(bool value) { this->start_control_ = value; }
+  // 0 off, 1 discrete, 2 continuous (workflow::start::StartMode).
+  void set_start_control(uint8_t mode) { this->start_mode_ = static_cast<workflow::start::StartMode>(mode); }
   void set_pid_adaptive(bool value) { this->tuning_.adaptive = value; }
   void set_pid_response_time(uint32_t ms) { this->tuning_.response_time_s = ms / 1000.0f; }
   void set_pid_dead_time(uint32_t ms) { this->tuning_.dead_time_s = ms / 1000.0f; }
@@ -79,6 +80,8 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   void set_hysteresis_enabled(bool value) { this->hysteresis_enabled_ = value; }
   void set_hysteresis_on(float value) { this->hysteresis_on_ = value; }
   void set_hysteresis_off(float value) { this->hysteresis_off_ = value; }
+  // Continuous start control: parked past this on shared heat (default off_threshold).
+  void set_shared_off_threshold(float value) { this->shared_off_threshold_ = value; }
   void set_hysteresis_off_limit(float value) { this->hysteresis_off_limit_ = value; }
   void set_hysteresis_off_delay(uint32_t ms) { this->hysteresis_off_delay_ms_ = ms; }
   void set_min_cycle_duration(uint32_t value) { this->min_cycle_ms_ = value; }
@@ -249,7 +252,8 @@ class ClimateAdaptivePID : public Component, public climate::Climate {
   float max_adjustment_under_{2.0f};
   float max_adjustment_over_{2.0f};
   float setpoint_deadband_{0.0f};
-  bool start_control_{false};
+  workflow::start::StartMode start_mode_{workflow::start::StartMode::OFF};
+  float shared_off_threshold_{NAN};
   float hysteresis_on_{0.25f};
   float hysteresis_off_{0.25f};
   float hysteresis_off_limit_{NAN};

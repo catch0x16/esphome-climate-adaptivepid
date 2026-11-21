@@ -342,7 +342,9 @@ void ClimateAdaptivePID::setup() {
     // controller switches a parked head back on at the on threshold). It still
     // cuts power past its off threshold, after off_delay; the start controller
     // parks at once instead while heat arrives from other heads.
-    const bool start_control = this->pid_enabled_ && this->start_control_;
+    // A continuous head is under start control only while engaged; its
+    // hysteresis switches it on otherwise (run_workflows_).
+    const bool start_control = this->pid_enabled_ && this->start_mode_ == workflow::start::StartMode::DISCRETE;
     this->hysteresis_step_ = new (std::nothrow) workflow::hysterisis::HysterisisWorkflowStep(
         this->hysteresis_on_, this->hysteresis_off_, this->hysteresis_off_limit_, this->hysteresis_off_delay_ms_);
     if (this->hysteresis_step_ == nullptr) {
@@ -361,14 +363,17 @@ void ClimateAdaptivePID::setup() {
       this->mark_failed();
       return;
     }
-    if (this->start_control_) {
+    if (this->start_mode_ != workflow::start::StartMode::OFF) {
       workflow::start::StartConfig config;
       config.on_threshold = this->hysteresis_on_;
-      config.off_threshold = this->hysteresis_off_;
+      config.off_threshold = this->start_mode_ == workflow::start::StartMode::CONTINUOUS &&
+                                     std::isfinite(this->shared_off_threshold_)
+                                 ? this->shared_off_threshold_
+                                 : this->hysteresis_off_;
       config.min_cycle_ms = this->min_cycle_ms_;
       const float step = this->traits_.get_visual_target_temperature_step();
       config.step = step > 0.0f ? step : 0.5f;
-      this->pid_step_->configureStartControl(config);
+      this->pid_step_->configureStartControl(config, this->start_mode_);
     }
   }
 
@@ -572,6 +577,10 @@ void ClimateAdaptivePID::run_workflows_() {
     return;
   }
   if (this->hysteresis_step_ != nullptr) {
+    if (this->pid_step_ != nullptr && this->start_mode_ == workflow::start::StartMode::CONTINUOUS) {
+      // While start control is engaged it switches a parked head back on itself.
+      this->hysteresis_step_->setTurnOnEnabled(!this->pid_step_->startControlEngaged());
+    }
     this->hysteresis_step_->run(current, &this->device_);
   }
   if (this->pid_step_ != nullptr) {
@@ -720,7 +729,7 @@ void ClimateAdaptivePID::control(const climate::ClimateCall &call) {
 }
 
 bool ClimateAdaptivePID::start_control_active_() const {
-  return this->pid_step_ != nullptr && this->pid_step_->isStartControl();
+  return this->pid_step_ != nullptr && this->pid_step_->startControlEngaged();
 }
 
 float ClimateAdaptivePID::idle_setpoint_() const {
@@ -750,7 +759,7 @@ void ClimateAdaptivePID::publish_diagnostics_() {
   publish_value(this->device_set_point_sensor_, this->inner_->target_temperature);
   // Under start control the device setpoint is one of three levels; the PID's
   // own output is what it asks for, continuous.
-  const bool start_control = this->pid_step_ != nullptr && this->pid_step_->isStartControl();
+  const bool start_control = this->pid_step_ != nullptr && this->pid_step_->startControlEngaged();
   publish_value(this->pid_set_point_sensor_,
                 start_control ? this->pid_step_->pidOutput() : this->device_.corrected_target());
   if (this->pid_step_ != nullptr) {
@@ -763,7 +772,10 @@ void ClimateAdaptivePID::publish_diagnostics_() {
     publish_value(this->dead_time_heating_sensor_, m.heat_dead_s / 60.0f);
     publish_value(this->dead_time_cooling_sensor_, m.cool_dead_s / 60.0f);
     if (this->pid_step_->isStartControl()) {
-      publish_value(this->control_state_sensor_, static_cast<float>(this->pid_step_->startState()));
+      // 4: a continuous head with start control not engaged.
+      publish_value(this->control_state_sensor_, this->pid_step_->startControlEngaged()
+                                                     ? static_cast<float>(this->pid_step_->startState())
+                                                     : 4.0f);
       publish_binary(this->shared_heat_sensor_, this->pid_step_->sharedHeat());
     }
   }
@@ -778,9 +790,10 @@ void ClimateAdaptivePID::dump_config() {
     ESP_LOGCONFIG(TAG, "  PID: kp=%.3f ki=%.4f kd=%.3f, adjustment -%.2f/+%.2f, setpoint deadband %.2f", this->kp_,
                   this->ki_, this->kd_, this->max_adjustment_under_, this->max_adjustment_over_,
                   this->setpoint_deadband_);
-    if (this->start_control_) {
-      ESP_LOGCONFIG(TAG, "  Start control: PID output vs room, on below -%.2f, park past +%.2f, humidity: %s",
-                    this->hysteresis_on_, this->hysteresis_off_,
+    if (this->start_mode_ != workflow::start::StartMode::OFF) {
+      ESP_LOGCONFIG(TAG, "  Start control: %s, PID output vs room, on below -%.2f, park on shared heat past +%.2f, humidity: %s",
+                    workflow::start::start_mode_to_string(this->start_mode_), this->hysteresis_on_,
+                    this->pid_step_ != nullptr ? this->pid_step_->startConfigOffThreshold() : this->hysteresis_off_,
                     this->humidity_sensor_ != nullptr ? "sensor" : "none");
     }
     if (this->tuning_.adaptive) {

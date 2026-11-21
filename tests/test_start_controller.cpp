@@ -435,6 +435,62 @@ int main() {
     check(c.update(in).level == Level::OFF, "no PID output: off level");
   }
 
+  {
+    // resync (continuous mode): the state is adopted from the device.
+    StartController c = make();
+    StartInput in = input(10 * MIN, -0.6f);
+    in.powered = false;
+    c.resync(in, false, 0, false, 0);
+    check(c.state() == HeadState::PARKED, "resync: device off -> PARKED");
+    in.powered = true;
+    in.operating = true;
+    c.resync(in, false, 0, false, 0);
+    check(c.state() == HeadState::RUN, "resync: running -> RUN");
+    in.operating = false;
+    c.resync(in, false, 0, false, 0);
+    check(c.state() == HeadState::IDLE, "resync: powered, idle -> IDLE");
+  }
+  {
+    // resync: a run in progress is stopped once heat arrives from other heads.
+    StartController c = make();
+    StartInput in = input(10 * MIN, 0.2f);
+    in.operating = true;
+    c.resync(in, false, 0, false, 0);
+    in.shared_heat = true;
+    StartDecision d = c.update(in);
+    check(d.transition == Transition::STOPPED_SHARED && c.state() == HeadState::IDLE,
+          "resync: an adopted run stops on shared heat");
+    check(near(d.setpoint, 19.0f), "resync: off level after the stop");
+  }
+  {
+    // resync: a power change seen while not engaged still holds the minimum cycle.
+    StartController c = make();
+    StartInput in = at_room(input(10 * MIN, -0.6f), 20.8f, -0.6f);
+    in.shared_heat = true;
+    c.resync(in, true, 10 * MIN - 30 * S, false, 0);
+    check(c.update(in).power == PowerRequest::NONE, "resync: no park within min_cycle of a power change");
+    in.now_ms = 10 * MIN + 31 * S;
+    check(c.update(in).power == PowerRequest::TURN_OFF, "resync: parks once min_cycle has passed");
+  }
+  {
+    // resync: a stop seen while not engaged holds the next start.
+    StartController c = make();
+    StartInput in = input(10 * MIN, 0.2f);
+    c.resync(in, false, 0, true, 10 * MIN - 30 * S);
+    check(c.update(in).transition == Transition::NONE, "resync: no start within min_cycle of a stop");
+    in.now_ms = 10 * MIN + 31 * S;
+    check(c.update(in).transition == Transition::STARTED, "resync: starts once min_cycle has passed");
+  }
+  {
+    // resync: a parked head catches heat from other heads without a fresh init.
+    StartController c = make();
+    StartInput in = at_room(input(10 * MIN, 0.3f), 20.1f, 0.3f);
+    in.powered = false;
+    in.shared_heat = true;
+    c.resync(in, false, 0, false, 0);
+    check(c.update(in).power == PowerRequest::TURN_ON, "resync: parked and short of target -> catch");
+  }
+
   std::printf("%s\n", failures == 0 ? "all passed" : "FAILURES");
   return failures == 0 ? 0 : 1;
 }

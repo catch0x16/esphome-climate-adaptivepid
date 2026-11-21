@@ -32,7 +32,7 @@ The measurements behind the coordination are in [research/shared-outdoor-unit.md
 
 **Config flow.**
 - **Pick the heads on one outdoor unit:** their adaptive PID climates, at least two.
-- **Pick the rooms that receive hints, highest precedence first:** they need `start_control` and the ESPHome action below.
+- **Pick the rooms that receive hints, highest precedence first:** they need `start_control` (`discrete` or `continuous`) and the ESPHome action below.
 - **Optionally, the outdoor temperature sensor**, for recovery estimates.
 
 For each head, the integration finds its `Operating` binary sensor and its ESPHome node name (from the head's ESPHome config entry) through the device registry.
@@ -60,7 +60,7 @@ The leak runs mostly downhill anyway. Into the idle, powered primary (2026-11-16
 
 With a single hinted room, nothing changes: it hears from every other head.
 
-**Forecast.** Before it was put under start control, the primary bedroom started at a steady deficit below its target (0.22–0.37 °C, median 0.32, over 62 starts). Under start control, its starts follow the PID's output, so the learned deficit may take a few days to settle again. For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. Heat and cool starts are learned separately. The history is saved (see **Saved state** below), so forecasts carry on after a Home Assistant restart.
+**Forecast.** A head on the regular PID path starts at a steady deficit below its target: the primary bedroom at 0.22–0.37 °C, median 0.32, over 62 starts. The primary is in continuous mode, on the regular path except while the main floor runs, so its deficit is still learnable. For every head the supervisor learns the deficit at its last 8 starts (4 needed), and predicts the next start from its room temperature and its fall over the last 5 minutes. Three minutes out, 41 of 50 forecasts were within 2 minutes. There is no forecast in the first 3 minutes after a stop, while the room is flat, or once the room is more than 0.15 past the predicted level. Heat and cool starts are learned separately. The history is saved (see **Saved state** below), so forecasts carry on after a Home Assistant restart.
 
 Only starts reached by drifting are learned:
 - **A start within 10 minutes of a target or mode change** was commanded (a schedule raising the target starts the head at once, a full degree below it) and is not learned.
@@ -141,7 +141,7 @@ So:
 - **Mode:** all heads must run in the same mode (heat or cool).
 - **Capacity:** the heads share the outdoor unit's capacity.
 - **Defrost and compressor starts** happen once, for all of them.
-- **Heat leaks between heads.** While any head runs, a powered idle head keeps receiving refrigerant and its fan blows that into its room: +0.16 °C/min in the second bedroom, +0.05 in the primary. Only switching the head off stops it. This is what Release 1 coordinates. The main floor's 06:30 warm-up (66–101 minutes) took the primary from its target to +0.8…+1.2 every morning of 2026-11-17..21, with no run of its own, until the primary was put under start control and hinted too.
+- **Heat leaks between heads.** While any head runs, a powered idle head keeps receiving refrigerant and its fan blows that into its room: +0.16 °C/min in the second bedroom, +0.05 in the primary. Only switching the head off stops it. This is what Release 1 coordinates. The main floor's 06:30 warm-up (66–101 minutes) took the primary from its target to +0.8…+1.2 every morning of 2026-11-17..21, with no run of its own. The primary is now hinted, in continuous start control mode: it parks at once at +0.4 while the main floor runs, and keeps its own cycles otherwise.
 
 Each head runs `climate_adaptivepid` (this repo) on an ESP32 over the `cn105`
 driver.

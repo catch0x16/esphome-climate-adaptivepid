@@ -89,6 +89,8 @@ class SharedHeatDetector {
     return left > 0.0f ? left : 0.0f;
   }
 
+  // The supervisor's hint alone: on and still valid.
+  bool hint(uint32_t now_ms) const { return this->hint_valid(now_ms) && this->hint_; }
   bool local() const { return this->local_; }
   bool active(uint32_t now_ms) const { return this->hint_valid(now_ms) ? this->hint_ : this->local_; }
 

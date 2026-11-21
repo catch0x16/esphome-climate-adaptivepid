@@ -48,6 +48,7 @@ CONF_INITIAL_HEAT_LOSS = "initial_heat_loss"
 CONF_HYSTERESIS = "hysteresis"
 CONF_ON_THRESHOLD = "on_threshold"
 CONF_OFF_THRESHOLD = "off_threshold"
+CONF_SHARED_OFF_THRESHOLD = "shared_off_threshold"
 CONF_OFF_DELAY = "off_delay"
 CONF_OFF_LIMIT = "off_limit"
 CONF_MIN_CYCLE_DURATION = "min_cycle_duration"
@@ -75,6 +76,22 @@ ClimateAdaptivePID = climate_adaptivepid_ns.class_(
     "ClimateAdaptivePID", climate.Climate, cg.Component
 )
 
+# start_control: the mode, and its value in C++ (workflow::start::StartMode).
+START_CONTROL_MODES = {"off": 0, "discrete": 1, "continuous": 2}
+
+
+def _start_control(value):
+    if isinstance(value, str) and value.strip().lower() in START_CONTROL_MODES:
+        return value.strip().lower()
+    # true and false, from before the modes: discrete and off.
+    try:
+        return "discrete" if cv.boolean(value) else "off"
+    except cv.Invalid as err:
+        raise cv.Invalid(
+            f"{CONF_START_CONTROL} must be one of off, discrete or continuous"
+        ) from err
+
+
 PID_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_KP, default=0.0): cv.float_,
@@ -93,7 +110,12 @@ PID_SCHEMA = cv.Schema(
         # running (one step below the unit's reported temperature) or off (two
         # steps below). For units whose thermostat starts once its setpoint
         # reaches the remote temperature.
-        cv.Optional(CONF_START_CONTROL, default=False): cv.boolean,
+        #   off         the regular PID path only (default; false)
+        #   discrete    start control always (true)
+        #   continuous  the regular PID path, and start control only while the
+        #               supervisor says a higher-ranked head is running or
+        #               expected to start
+        cv.Optional(CONF_START_CONTROL, default="off"): _start_control,
         cv.Optional(CONF_START_THRESHOLD): cv.invalid(
             f"{CONF_START_THRESHOLD} was removed: under {CONF_START_CONTROL} a run "
             "starts once the PID's output reaches the room temperature"
@@ -154,6 +176,10 @@ HYSTERESIS_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_ON_THRESHOLD, default=0.25): cv.positive_float,
         cv.Optional(CONF_OFF_THRESHOLD, default=0.25): cv.positive_float,
+        # start_control: continuous only. Where the head is parked, at once,
+        # while a higher-ranked head runs (default: off_threshold). The regular
+        # path keeps off_threshold, so the head's own band is unchanged.
+        cv.Optional(CONF_SHARED_OFF_THRESHOLD): cv.positive_float,
         # Past off_threshold the device is first held at least output (the PID
         # pulled down); it is switched off once the room has stayed past the
         # threshold this long, or at once past off_limit.
@@ -183,15 +209,22 @@ HYSTERESIS_SCHEMA = cv.All(HYSTERESIS_SCHEMA, _validate_off_limit)
 
 def _validate_start_control_hysteresis(config):
     # Start control parks and unparks the head on the hysteresis band.
-    if (
-        CONF_PID in config
-        and config[CONF_PID][CONF_START_CONTROL]
-        and CONF_HYSTERESIS not in config
-    ):
+    mode = config[CONF_PID][CONF_START_CONTROL] if CONF_PID in config else "off"
+    if mode != "off" and CONF_HYSTERESIS not in config:
         raise cv.Invalid(
             f"{CONF_START_CONTROL} requires {CONF_HYSTERESIS}: the head is parked past "
             "its off_threshold and switched back on at its on_threshold",
             path=[CONF_PID, CONF_START_CONTROL],
+        )
+    if (
+        mode != "continuous"
+        and CONF_HYSTERESIS in config
+        and CONF_SHARED_OFF_THRESHOLD in config[CONF_HYSTERESIS]
+    ):
+        raise cv.Invalid(
+            f"{CONF_SHARED_OFF_THRESHOLD} needs {CONF_START_CONTROL}: continuous "
+            "(discrete start control parks at off_threshold)",
+            path=[CONF_HYSTERESIS, CONF_SHARED_OFF_THRESHOLD],
         )
     return config
 
@@ -335,7 +368,7 @@ async def to_code(config):
         cg.add(var.set_max_adjustment_under(conf[CONF_MAX_ADJUSTMENT_UNDER]))
         cg.add(var.set_max_adjustment_over(conf[CONF_MAX_ADJUSTMENT_OVER]))
         cg.add(var.set_setpoint_deadband(conf[CONF_SETPOINT_DEADBAND]))
-        cg.add(var.set_start_control(conf[CONF_START_CONTROL]))
+        cg.add(var.set_start_control(START_CONTROL_MODES[conf[CONF_START_CONTROL]]))
         cg.add(var.set_pid_adaptive(conf[CONF_ADAPTIVE]))
         cg.add(var.set_pid_response_time(conf[CONF_RESPONSE_TIME]))
         cg.add(var.set_pid_dead_time(conf[CONF_DEAD_TIME]))
@@ -354,6 +387,8 @@ async def to_code(config):
         cg.add(var.set_hysteresis_enabled(True))
         cg.add(var.set_hysteresis_on(conf[CONF_ON_THRESHOLD]))
         cg.add(var.set_hysteresis_off(conf[CONF_OFF_THRESHOLD]))
+        if CONF_SHARED_OFF_THRESHOLD in conf:
+            cg.add(var.set_shared_off_threshold(conf[CONF_SHARED_OFF_THRESHOLD]))
         cg.add(var.set_hysteresis_off_delay(conf[CONF_OFF_DELAY]))
         cg.add(
             var.set_hysteresis_off_limit(
@@ -391,7 +426,7 @@ async def to_code(config):
                 (CONF_DEAD_TIME_COOLING, var.set_dead_time_cooling_sensor),
             ):
                 cg.add(setter(await sensor.new_sensor(config[key])))
-        if config[CONF_PID][CONF_START_CONTROL]:
+        if config[CONF_PID][CONF_START_CONTROL] != "off":
             cg.add(
                 var.set_control_state_sensor(
                     await sensor.new_sensor(config[CONF_CONTROL_STATE])

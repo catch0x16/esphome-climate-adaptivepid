@@ -90,7 +90,8 @@ or reconfigured under its key (`internal_power`, `device_power`, `operating`,
 `device_current_temperature`, `device_set_point`, `pid_set_point`, `pid_kp`,
 `pid_ki`, `heating_rate`, `cooling_rate`, `heat_loss`, `dead_time_heating`,
 `dead_time_cooling`). With start control there are also `Control state`
-(0 IDLE, 1 START, 2 RUN, 3 PARKED) and `Shared heat`
+(0 IDLE, 1 START, 2 RUN, 3 PARKED, 4 CONTINUOUS: continuous mode, not
+engaged) and `Shared heat`
 (`control_state`, `shared_heat`). Anything device-specific, such as
 compressor frequency or energy, comes from the inner climate's own sensors.
 
@@ -143,7 +144,15 @@ reported temperature it keeps running, and a stopped unit restarts on its own
 once its anti-short-cycle timer allows; 1.0°C below it stays off. Rounding a
 continuous PID output onto that grid turns small corrections into full starts.
 
-With `start_control: true` the PID's output (bounded by `max_adjustment_under`
+`start_control` takes `off` (the default), `discrete` (`true`: always, as
+below) or `continuous`. Continuous mode keeps the regular PID path, and uses
+everything below only while a supervisor says a higher-ranked head on the same
+outdoor unit is running or about to start. It then parks the head at once past
+`hysteresis: shared_off_threshold` (default `off_threshold`), so the head's own
+band is unchanged. See
+[Continuous mode](docs/start-control-design.md#continuous-mode).
+
+With `start_control: discrete` the PID's output (bounded by `max_adjustment_under`
 and `max_adjustment_over`) is compared with the room temperature every update,
 the way the unit compares its setpoint with it, and drives the setpoint across
 those three levels:
@@ -366,6 +375,8 @@ tests/fixtures/.esphome/build/workflow-scenario/.pioenvs/workflow-scenario/progr
 # Start control on the host (a smoke test of the wiring)
 uv run --locked esphome compile tests/fixtures/start_control.yaml
 tests/fixtures/.esphome/build/start-control-scenario/.pioenvs/start-control-scenario/program
+uv run --locked esphome compile tests/fixtures/start_control_continuous.yaml
+tests/fixtures/.esphome/build/start-control-continuous/.pioenvs/start-control-continuous/program
 
 # Compile check against the upstream CN105 driver
 uv run --locked esphome compile tests/fixtures/cn105.yaml
@@ -386,7 +397,7 @@ Layout of `components/climate_adaptivepid/`:
 - `tuning_rule.h`: the gains that follow from the model; no ESPHome dependency.
 - `tuning_store.h`: whether each learned value starts from what was learned or its seed at boot; no ESPHome dependency.
 - `controller_types.h`: the interface between the controller and the device.
-- `start_controller.h`, `shared_heat_detector.h`, `burst_learner.h`: start control; no ESPHome dependency.
+- `start_controller.h`, `shared_heat_detector.h`, `burst_learner.h`, `start_engagement.h`: start control; no ESPHome dependency.
 - `off_gate.h`: when hysteresis switches a running device off; no ESPHome dependency.
 
 `custom_components/climate_adaptivepid_supervisor/`: the Home Assistant
