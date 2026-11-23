@@ -80,7 +80,7 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 | From → to | Trigger | Action |
 |---|---|---|
 | IDLE → START | start level, **and** no shared heat, **and** ≥ `min_cycle_duration` since the last stop, **and** hysteresis isn't holding, **and** not deferred (below) | start level |
-| IDLE (deferred) | a start is due, **but** the supervisor forecasts shared heat within 5 min, **and** the room is less than 0.5 short of the target, **and** the deferral has lasted less than 6 min | off level. Ends when the heat arrives, the forecast is dropped, at the 0.5 floor, or after 6 min |
+| IDLE (deferred) | a start is due, **but** the supervisor forecasts shared heat within 5 min, **and** the room is less than 0.5 short of the target, **and** the deferral has lasted less than 6 min, **and** the head has not already given way to this forecast (below) | off level. Ends when the heat arrives, the forecast is dropped, at the 0.5 floor, or after 6 min |
 | START → RUN | the unit has reported `operating` for 60 s without a break (right after power-on a unit can report running for ~20 s and stop; until confirmed the start is kept) | level asked for |
 | START → IDLE | the PID no longer asks for a start and the unit never ran | no stop is counted, so the minimum cycle doesn't apply |
 | START (fault) | 15 min with no run (`start_fault_ms`) | logged once at WARNING; the start is kept |
@@ -88,7 +88,7 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 | RUN → IDLE | the unit stops by itself | — |
 | RUN → IDLE (PID stop) | off level, **and** at least 2 minutes since the start (`min_run`) | off level (the unit stops within 10 s) |
 | RUN → IDLE | shared heat starts | off level |
-| RUN → IDLE | at least 2 minutes running, **and** shared heat forecast within 2 min | off level |
+| RUN → IDLE | at least 2 minutes running, **and** shared heat forecast within 2 min, **and** the room is less than 0.5 short of the target, **and** the head has not already given way to this forecast (below) | off level |
 | IDLE → RUN | the unit runs without a START, more than 60 s after the last commanded stop (for example on its own timer at the running level) | tracked as a run (logged as unrequested) |
 | START/RUN → IDLE | hysteresis is holding (room past `off_threshold`, waiting out `off_delay`) | off level |
 | IDLE → PARKED | shared heat **and** room > target + `off_threshold`, **and** ≥ `min_cycle_duration` since the last power change | switch the device off (at once, no `off_delay`) |
@@ -97,6 +97,8 @@ Evaluated on every workflow update (2 s) while the outer mode is HEAT or COOL.
 | PARKED → IDLE (catch) | room more than 0.1 short of the target, **and** shared heat arriving or forecast within 5 min, **and** ≥ `min_cycle_duration` since the last power change | switch the device on, so its fan brings in the other head's heat |
 
 In IDLE, the off level is also sent within 60 s (`stop_grace`) of a commanded stop, and while shared heat is on or forecast, so the unit isn't left free to restart on its own timer.
+
+A head gives way to a forecast once: one deferral that runs out, or one run stopped for it. Until the forecast clears or the heat arrives, it then neither defers nor stops for it, and the forecast no longer holds it at the off level while idle. A forecast that doesn't come true (the other head parked, its room flat at its start level) would otherwise cut every run at `min_run` and defer every start for as long as it is renewed: on 2026-11-22 that held the primary bedroom 0.5 °C under its target for 1.5 hours.
 
 **The integral** accumulates in IDLE, START and RUN, so it follows the room through whole cycles. It is frozen only while PARKED. While PARKED the PID keeps running (unlike the regular path, which resets it when the device is off), so its output is current once the head is switched back on. It resets when the target changes, and stops accumulating at either output bound.
 

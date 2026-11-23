@@ -52,6 +52,10 @@ class Head:
     # The room temperature the head regulates, and its target.
     room: float | None = None
     target: float | None = None
+    # False while the head's device is switched off in heat or cool (parked by
+    # hysteresis or start control: hvac_action "off"). A parked head starts only
+    # once it is switched back on, so no start is forecast for it. None: not known.
+    powered: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,10 @@ AFTER_STOP_S = 180.0
 MIN_FALL_PER_S = 0.0001
 # Past the start level by more than this, the forecast is dropped as wrong.
 OVERDUE_MARGIN = 0.15
+# A forecast that has been due (0 s) this long without a start is dropped as
+# wrong: a room holding flat at its start level would otherwise be "starting
+# now" for as long as it stays there, and hold the rooms below it back.
+OVERDUE_HOLD_S = 300.0
 # Forecasts further out than this are not sent.
 EXPECT_WINDOW_S = 300
 # A start this soon after a target or mode change was commanded, not reached
@@ -122,6 +130,9 @@ class StartPredictor:
     target: float | None = None
     mode: str | None = None
     last_change: float | None = None
+    # When the forecast last became due (0 s); cleared by a start, a stop or a
+    # target or mode change, not by the room wobbling back above the level.
+    overdue_since: float | None = None
 
     def observe(self, now: float, head: Head) -> bool:
         """Called on every state change and renewal with the head's state.
@@ -131,10 +142,12 @@ class StartPredictor:
         if head.target is not None:
             if self.target is not None and head.target != self.target:
                 self.last_change = now
+                self.overdue_since = None
             self.target = head.target
         if head.mode is not None:
             if self.mode is not None and head.mode != self.mode:
                 self.last_change = now
+                self.overdue_since = None
             self.mode = head.mode
         commanded = self.last_change is not None and now - self.last_change < AFTER_CHANGE_S
         started = bool(head.operating) and self.operating is False
@@ -150,6 +163,8 @@ class StartPredictor:
         if head.operating is False and self.operating is not False:
             # A stop, or a gap that ended stopped (it may have just stopped).
             self.last_stop = now
+        if head.operating is not False:
+            self.overdue_since = None
         self.operating = head.operating
         if head.room is not None:
             if not self.samples or now - self.samples[-1][0] >= 1.0:
@@ -180,6 +195,8 @@ class StartPredictor:
         """Seconds until the head is predicted to start, or None."""
         if head.operating is not False or head.mode not in ("heat", "cool") or head.room is None or head.target is None:
             return None
+        if head.powered is False:
+            return None
         deficits = self.deficits.get(head.mode, ())
         if len(deficits) < MIN_STARTS:
             return None
@@ -190,7 +207,11 @@ class StartPredictor:
         # How far the room still has to go, in the direction it drifts.
         to_go = sign * (head.room - level)
         if to_go <= 0.0:
-            return 0.0 if -to_go <= OVERDUE_MARGIN else None
+            if -to_go > OVERDUE_MARGIN:
+                return None
+            if self.overdue_since is None:
+                self.overdue_since = now
+            return 0.0 if now - self.overdue_since < OVERDUE_HOLD_S else None
         old = [(t, room) for t, room in self.samples if now - t >= SLOPE_WINDOW_S]
         if not old:
             return None

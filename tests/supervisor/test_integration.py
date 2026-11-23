@@ -400,6 +400,39 @@ async def test_forecast_lifecycle(hass: HomeAssistant, house: FakeHouse, freezer
     ]
 
 
+async def test_no_forecast_while_the_head_is_parked(
+    hass: HomeAssistant, house: FakeHouse, freezer: FrozenDateTimeFactory
+) -> None:
+    """A head switched off (hvac_action off) is not forecast to start."""
+    house.set_climate("primary", room=19.70, target=19.72)
+    await setup_supervisor(hass, house)
+
+    async def primary(room: float, operating: bool | None = None, minutes: float = 1.0, action: str | None = None) -> None:
+        freezer.tick(timedelta(minutes=minutes))
+        house.set_climate("primary", room=room, target=19.72, action=action)
+        if operating is not None:
+            house.set_operating("primary", operating)
+        await hass.async_block_till_done()
+
+    for _ in range(4):
+        await primary(19.70)
+        await primary(19.40)
+        await primary(19.40, operating=True)
+        await primary(19.80, minutes=8)
+        await primary(19.80, operating=False)
+
+    # The same fall that is forecast in test_forecast_lifecycle, but parked.
+    house.heads["hailee"].calls.clear()
+    for minute in range(12):
+        await primary(20.30 - 0.06 * minute, action="off")
+    assert all(call[1]["expected_in_s"] == -1 for call in house.calls("hailee", "shared_heat_expected"))
+
+    # Switched back on: forecast again.
+    await primary(19.40, action="idle")
+    sent = house.calls("hailee", "shared_heat_expected")
+    assert sent and sent[-1][1]["expected_in_s"] == 0
+
+
 async def test_head_without_forecast_action(hass: HomeAssistant, house: FakeHouse) -> None:
     hass.services.async_remove("esphome", "haileesbedroomhvac_shared_heat_expected")
     await setup_supervisor(hass, house)

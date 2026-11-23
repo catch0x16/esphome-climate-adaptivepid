@@ -315,6 +315,81 @@ int main() {
           "expected stop: stopped for expected heat, off level");
   }
   {
+    // Past the defer_floor short of target, a run is not stopped for expected heat.
+    StartController c = make();
+    StartInput in = at_room(input(0, 0.3f), 19.75f, 0.3f);  // 0.53 short
+    c.update(in);
+    in.now_ms = 10 * S;
+    in.operating = true;
+    c.update(in);
+    in.now_ms = 2 * MIN + 20 * S;
+    in.shared_expected_s = 0.0f;
+    StartDecision d = c.update(in);
+    check(d.state == HeadState::RUN && d.transition == Transition::NONE,
+          "expected stop: not past the floor (0.53 short)");
+  }
+  {
+    // A forecast that never comes true (the main floor parked, flat at its
+    // start level, "starting now" for an hour): the head gives way once, then
+    // runs to the PID's stop rather than being cut at every min_run.
+    StartController c = running(0, 0.3f);
+    StartInput in = input(2 * MIN + 20 * S, 0.3f);
+    in.operating = true;
+    in.shared_expected_s = 0.0f;
+    StartDecision d = c.update(in);
+    check(d.transition == Transition::STOPPED_EXPECTED, "overdue forecast: the first run is stopped for it");
+    in.now_ms = 2 * MIN + 30 * S;
+    in.operating = false;
+    c.update(in);
+    in.now_ms = 3 * MIN + 30 * S;  // past min_cycle and stop_grace
+    d = c.update(in);
+    check(d.state == HeadState::START && d.transition == Transition::STARTED,
+          "overdue forecast: the next start is not deferred again");
+    in.now_ms = 3 * MIN + 40 * S;
+    in.operating = true;
+    c.update(in);
+    in.now_ms = 6 * MIN;  // past min_run
+    d = c.update(in);
+    check(d.state == HeadState::RUN && d.transition == Transition::NONE,
+          "overdue forecast: the next run is not stopped for it");
+    check(near(d.setpoint, 20.0f), "overdue forecast: the run keeps the start level");
+    // Cleared and forecast anew: the head gives way again.
+    in.now_ms = 6 * MIN + 10 * S;
+    in.shared_expected_s = NAN;
+    c.update(in);
+    in.now_ms = 6 * MIN + 20 * S;
+    in.shared_expected_s = 60.0f;
+    check(c.update(in).transition == Transition::STOPPED_EXPECTED, "a new forecast is owed a stop again");
+  }
+  {
+    // A deferral that ran out counts as giving way: the run it ends in is not stopped for the same forecast.
+    StartController m = make();
+    StartInput in = input(0, 0.3f);
+    in.shared_expected_s = 0.0f;
+    m.update(in);
+    in.now_ms = 6 * MIN;
+    check(m.update(in).state == HeadState::START, "deferral ran out: starts");
+    in.now_ms = 6 * MIN + 10 * S;
+    in.operating = true;
+    m.update(in);
+    in.now_ms = 8 * MIN + 30 * S;
+    StartDecision d = m.update(in);
+    check(d.state == HeadState::RUN && d.transition == Transition::NONE,
+          "deferral ran out: the run is not stopped for the same forecast");
+  }
+  {
+    // While idle after giving way, the running level is sent again (the unit
+    // may restart on its own), not the off level that waiting asks for.
+    StartController c = running(0, -0.2f);  // the PID asks to keep running
+    StartInput in = input(2 * MIN + 20 * S, -0.2f);
+    in.operating = true;
+    in.shared_expected_s = 0.0f;
+    check(c.update(in).transition == Transition::STOPPED_EXPECTED, "idle after giving way: stopped once");
+    in.now_ms = 4 * MIN;  // past stop_grace
+    in.operating = false;
+    check(near(c.update(in).setpoint, 19.5f), "idle after giving way: running level, not the off level");
+  }
+  {
     // Park and unpark on the hysteresis band.
     StartController c = make();
     StartInput in = at_room(input(0, 0.0f), 20.6f, -0.6f);  // +0.32: inside the band

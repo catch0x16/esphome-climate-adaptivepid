@@ -255,6 +255,7 @@ class SupervisorCoordinator:
                 mode=state.state if state is not None else None,
                 room=_float_attr(state, "current_temperature"),
                 target=_float_attr(state, "temperature"),
+                powered=_powered(state),
             )
         return heads
 
@@ -402,6 +403,16 @@ class SupervisorCoordinator:
         if changed and value is not None:
             _LOGGER.info("%s: %s", climate, room_plan.reason)
             async_log_entry(self.hass, "Supervisor", room_plan.reason, domain=DOMAIN, entity_id=climate)
+
+
+def _powered(state) -> bool | None:
+    """False while the head's device is switched off in heat or cool (hvac_action "off")."""
+    if state is None:
+        return None
+    action = state.attributes.get("hvac_action")
+    if action is None:
+        return None
+    return action != "off"
 
 
 def _float_attr(state, name: str) -> float | None:

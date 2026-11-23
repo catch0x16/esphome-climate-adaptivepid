@@ -228,6 +228,7 @@ class StartController {
     this->heating_ = in.heating;
     this->level_ = Level::OFF;
     this->deferring_ = false;
+    this->yielded_ = false;
     this->fault_reported_ = false;
     this->operating_since_valid_ = false;
     this->stop_cmd_ms_ = in.now_ms - this->config_.stop_grace_ms;
@@ -258,6 +259,7 @@ class StartController {
       this->has_power_change_ = false;
       this->has_stop_ = false;
       this->level_ = Level::OFF;
+      this->yielded_ = false;
       this->stop_cmd_ms_ = in.now_ms - this->config_.stop_grace_ms;
       if (!in.powered) {
         this->state_ = HeadState::PARKED;
@@ -293,6 +295,17 @@ class StartController {
     // Heat from other heads is forecast within the window.
     const bool expected = std::isfinite(in.shared_expected_s) &&
                           in.shared_expected_s <= static_cast<float>(this->config_.expect_window_s);
+    // The head gives way to a forecast once: one deferral that runs out, or one
+    // run stopped for it. A forecast that doesn't come true (the other head
+    // never starts) would otherwise cut every run short for as long as it is
+    // renewed. It is owed again once the forecast clears or the heat arrives.
+    if (!expected || in.shared_heat) {
+      this->yielded_ = false;
+    }
+    const bool waiting = expected && !this->yielded_;
+    // Waiting for the other head's heat is worth it only near the target: past
+    // defer_floor short, the head neither defers a start nor stops a run for it.
+    const bool within_floor = known && -past < this->config_.defer_floor;
     if (this->state_ != HeadState::IDLE) {
       this->deferring_ = false;
     }
@@ -332,7 +345,7 @@ class StartController {
         // that would stack on top of it. Not past the floor, and not for long.
         // A deferral lasts while a start is wanted and the heat is expected;
         // once either goes (the heat came, or the forecast was dropped) it ends.
-        const bool defer = start && expected && known && -past < this->config_.defer_floor;
+        const bool defer = start && waiting && within_floor;
         if (!defer) {
           this->deferring_ = false;
         }
@@ -344,6 +357,8 @@ class StartController {
           }
           if (static_cast<uint32_t>(in.now_ms - this->defer_since_ms_) < this->config_.defer_max_ms) {
             start = false;
+          } else {
+            this->yielded_ = true;  // waited out defer_max; the heat didn't come
           }
         }
         if (start) {
@@ -416,8 +431,9 @@ class StartController {
         if (ran_long_enough && this->level_ == Level::OFF) {
           this->stop_(in.now_ms, true);
           out.transition = Transition::STOPPED_PID;
-        } else if (ran_long_enough && expected_soon) {
+        } else if (ran_long_enough && expected_soon && !this->yielded_ && within_floor) {
           this->stop_(in.now_ms, true);
+          this->yielded_ = true;
           out.transition = Transition::STOPPED_EXPECTED;
         } else if (in.shared_heat) {
           this->stop_(in.now_ms, true);
@@ -428,7 +444,7 @@ class StartController {
     }
 
     out.state = this->state_;
-    out.setpoint = this->setpoint_(in, view, sign, expected);
+    out.setpoint = this->setpoint_(in, view, sign, waiting);
     // The integral follows the room through every cycle, so a room that
     // averages past the target moves the start and stop points; it is frozen
     // only while the device is off.
@@ -477,7 +493,8 @@ class StartController {
     return (sign > 0.0f ? std::ceil(steps - GRID_TOLERANCE) : std::floor(steps + GRID_TOLERANCE)) * step;
   }
 
-  float setpoint_(const StartInput &in, float view, float sign, bool expected) const {
+  // `waiting`: heat from other heads is forecast and the head still gives way to it.
+  float setpoint_(const StartInput &in, float view, float sign, bool waiting) const {
     const float step = this->step_();
     const float keep = view - sign * step;
     const float off = view - sign * 2.0f * step;
@@ -489,7 +506,7 @@ class StartController {
       case HeadState::IDLE: {
         // The running level lets a stopped unit restart on its own timer, so
         // only while the PID asks for it and nothing holds the head back.
-        const bool keep_ok = this->level_ != Level::OFF && !in.shared_heat && !in.hold && !expected &&
+        const bool keep_ok = this->level_ != Level::OFF && !in.shared_heat && !in.hold && !waiting &&
                              static_cast<uint32_t>(in.now_ms - this->stop_cmd_ms_) >= this->config_.stop_grace_ms;
         return keep_ok ? keep : off;
       }
@@ -533,6 +550,8 @@ class StartController {
   // A start held off for expected heat from other heads, and since when.
   bool deferring_{false};
   uint32_t defer_since_ms_{0};
+  // The head has given way to the current forecast (see update()).
+  bool yielded_{false};
   bool has_stop_{false};
   uint32_t last_stop_ms_{0};
   uint32_t stop_cmd_ms_{0};

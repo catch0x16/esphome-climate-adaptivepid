@@ -5,6 +5,7 @@ import math
 import pytest
 
 from custom_components.climate_adaptivepid_supervisor.logic import (
+    OVERDUE_HOLD_S,
     UNKNOWN_HOLD_S,
     Head,
     OperatingHold,
@@ -186,6 +187,40 @@ def test_forecast_due_then_dropped_when_overdue():
         predictor.observe(now + 60 * minute, primary(19.60 - 0.02 * minute))
     assert predictor.expected_in_s(now + 600, primary(19.38)) == 0.0
     assert predictor.expected_in_s(now + 600, primary(19.20)) is None  # 0.2 past: wrong forecast
+
+
+def test_a_due_forecast_is_dropped_once_it_has_been_due_too_long():
+    """A room holding flat at its start level is not "starting now" for an hour."""
+    predictor, now = learned_predictor()
+    for minute in range(11):
+        predictor.observe(now + 60 * minute, primary(19.60 - 0.02 * minute))
+    now += 600
+    assert predictor.expected_in_s(now, primary(19.38)) == 0.0
+    assert predictor.expected_in_s(now + OVERDUE_HOLD_S - 1, primary(19.38)) == 0.0
+    assert predictor.expected_in_s(now + OVERDUE_HOLD_S, primary(19.38)) is None
+    # Wobbling back above the level and down again does not renew it.
+    predictor.observe(now + OVERDUE_HOLD_S + 60, primary(19.45))
+    predictor.expected_in_s(now + OVERDUE_HOLD_S + 60, primary(19.45))
+    assert predictor.expected_in_s(now + OVERDUE_HOLD_S + 120, primary(19.38)) is None
+    # A start and stop clear it: the next cycle is forecast again.
+    later = now + 2000
+    predictor.observe(later, primary(19.38, operating=True))
+    predictor.observe(later + 480, primary(19.80))
+    for minute in range(1, 12):
+        predictor.observe(later + 480 + 60 * minute, primary(19.80 - 0.04 * minute))
+    assert predictor.expected_in_s(later + 480 + 660, primary(19.36)) == 0.0
+
+
+def test_no_forecast_for_a_parked_head():
+    """A head switched off by hysteresis starts only once it is switched back on."""
+    predictor, now = learned_predictor()
+    for minute in range(11):
+        predictor.observe(now + 60 * minute, primary(19.60 - 0.02 * minute))
+    parked = Head(name="primary", operating=False, mode="heat", room=19.38, target=19.72, powered=False)
+    assert predictor.expected_in_s(now + 600, parked) is None
+    falling = Head(name="primary", operating=False, mode="heat", room=19.50, target=19.72, powered=False)
+    assert predictor.expected_in_s(now + 600, falling) is None
+    assert predictor.expected_in_s(now + 600, primary(19.38)) == 0.0  # powered: forecast as before
 
 
 def test_no_forecast_right_after_a_stop():

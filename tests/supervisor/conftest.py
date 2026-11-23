@@ -52,10 +52,13 @@ class FakeHouse:
     hass: HomeAssistant
     heads: dict[str, FakeHead]
 
-    def set_climate(self, key: str, mode: str = "heat", room: float = 20.0, target: float = 20.28) -> None:
-        self.hass.states.async_set(
-            self.heads[key].climate, mode, {"current_temperature": room, "temperature": target}
-        )
+    def set_climate(
+        self, key: str, mode: str = "heat", room: float = 20.0, target: float = 20.28, action: str | None = None
+    ) -> None:
+        attributes: dict[str, object] = {"current_temperature": room, "temperature": target}
+        if action is not None:
+            attributes["hvac_action"] = action
+        self.hass.states.async_set(self.heads[key].climate, mode, attributes)
 
     def set_operating(self, key: str, on: bool) -> None:
         self.hass.states.async_set(self.heads[key].operating, "on" if on else "off")
